@@ -19,4 +19,8 @@ public class Board {
     public int getPosition(int number){
         return positionMap.getOrDefault(number, number);
     }
+
+    public boolean checkWin(Player player) {
+        return player.getPosition() == size;
+    }
 }
