@@ -5,21 +5,7 @@ public class Cell {
     private boolean hasMine;
 
     public Cell() {
-        this.state = CellState.EMPTY;
-    }
-
-    public void flagCell(){
-        if (state != CellState.EMPTY){
-            throw new InvalidMoveException("Cell state is already "+ CellState.FLAG);
-        }
-        state = CellState.FLAG;
-    }
-
-    public void unFlagCell(){
-        if (state != CellState.FLAG){
-            throw new InvalidMoveException("Cell state is already "+ CellState.EMPTY);
-        }
-        state = CellState.EMPTY;
+        this.state = CellState.HIDDEN;
     }
 
     public void placeMine(boolean hasMine){
@@ -32,5 +18,9 @@ public class Cell {
 
     public boolean isHasMine() {
         return hasMine;
+    }
+
+    public void setState(CellState state) {
+        this.state = state;
     }
 }

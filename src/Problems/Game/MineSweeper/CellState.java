@@ -1,6 +1,7 @@
 package Problems.Game.MineSweeper;
 
 public enum CellState {
-    EMPTY,
+    HIDDEN,
+    REVEALED,
     FLAG;
 }
