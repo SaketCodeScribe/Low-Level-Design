@@ -1,2 +1,2 @@
 Problems Covered:
-  1. MineSweeperGame
+  1. MineSweeper Game
