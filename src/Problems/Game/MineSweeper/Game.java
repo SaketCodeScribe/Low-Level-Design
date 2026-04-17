@@ -13,7 +13,7 @@ public class Game {
         this.board = board;
         this.status = GameStatus.NOT_STARTED;
     }
-    public GameStatus makeMove(Position position, Action action){
+    public synchronized GameStatus makeMove(Position position, Action action){
         if (status == GameStatus.NOT_STARTED){
             status = GameStatus.IN_PROGRESS;
             board.placeMines(strategy, position);
