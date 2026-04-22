@@ -10,6 +10,6 @@ public abstract class Entity {
         return color;
     }
 
-    public abstract Position move(Position curr, Position newPos);
+    public abstract void move(Cell[][] grid, Position curr, Position newPos, ChessCondition currCondition);
 
 }
