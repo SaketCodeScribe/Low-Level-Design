@@ -6,9 +6,47 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 
 public class ATM {
+    private AtmState state;
+    private Transaction transaction;
+    private final BankService bankService;
+    private final CashDispenser cashDispenser;
+
+    public ATM(BankService bankService, CashDispenser cashDispenser) {
+        this.state = Idle.getInstance();
+        this.bankService = bankService;
+        this.cashDispenser = cashDispenser;
+    }
+
+    public void insertCard(Card card) {
+        transaction = new Transaction(card);
+        state = state.insertCard();
+    }
+
+    public void authenticate(String pin) {
+        state = state.authenticate(transaction, bankService, pin);
+    }
+
+    public void selectTransactionType(TransactionType transactionType) {
+        state = state.selectTransactionType(transaction, transactionType);
+    }
+
+    public void cashWithdrawal(double amt) {
+        state = state.cashWithdrawal(transaction, amt, bankService, cashDispenser);
+    }
+
+    public void cashDeposit(List<Map.Entry<Denomination, Integer>> cash) {
+        state = state.cashDeposit(transaction, cash, bankService, cashDispenser);
+    }
+
+    public void balanceInquiry() {
+        state = state.balanceInquiry(transaction, bankService);
+    }
+
+    public void cancel(){
+        state = Idle.getInstance();
+    }
 }
 
 class Card{
@@ -143,13 +181,10 @@ class BankService{
         return accountDetails.get(userId);
     }
 
-    private boolean sufficientFund(Account acc, double amount){
-        return acc != null && Double.compare(acc.getAmount(), amount) == 0;
-    }
     public void withdraw(String userId, double amt){
         assert amt >= 0;
         Account acc = accountDetails.get(userId);
-        if (sufficientFund(acc, amt)){
+        if (acc != null){
             updateBalance(acc, -amt);
         }
     }
@@ -158,7 +193,7 @@ class BankService{
     public void deposit(String userId, double amt){
         assert amt >= 0;
         Account acc = accountDetails.get(userId);
-        if (sufficientFund(acc, amt)){
+        if (acc != null){
             updateBalance(acc, amt);
         }
     }
@@ -170,6 +205,11 @@ class BankService{
         Account acc = accountDetails.get(userId);
         assert acc != null;
         return acc.getAmount();
+    }
+
+    public boolean authenticate(String userId, String ping){
+        Account acc = accountDetails.get(userId);
+        return ping.equals(acc.getCard().getPin());
     }
 }
 
@@ -183,47 +223,68 @@ class CashDispenser {
         }
     }
 
-    public void deposit(List<Map.Entry<Denomination, Integer>> cash){
-        for(Map.Entry<Denomination, Integer> c:cash){
+    public void deposit(Transaction transaction, BankService bankService, Map<Denomination, Integer> cash){
+        double totalCash = 0;
+        for(Map.Entry<Denomination, Integer> c:cash.entrySet()){
             denominations.compute(c.getKey(), (k, v) -> v + c.getValue());
+            totalCash += Denomination.getValue(c.getKey())* c.getValue();
+        }
+        if (!updateAmount(transaction, bankService, totalCash)){
+            System.out.println("Unable to connect to BankServer");
+            rollback(cash);
         }
     }
 
-    public void withdraw(Transaction transaction, BankService bankService, double amt){
-        List<Entry> l = new ArrayList<>();
+    public Map<Denomination, Integer> withdraw(Transaction transaction, BankService bankService, double amt){
+        List<Denomination> l = new ArrayList<>();
 
-        for(Denomination d:values){
-            int cnt = denominations.get(d);
-            if (cnt == 0) continue;
-            int withDraw = (int)(amt/Denomination.getValue(d));
-            int min = Math.min(cnt, withDraw);
-            denominations.put(d, cnt - min);
-            if (min > 0){
-                l.add(new Entry(d, -min));
+        if (amt <= 0) throw new AtmException("Amount > 0");
+
+        if (amt > bankService.inquire(transaction.getCard().getUserId())) throw new AtmException("Insufficient fund");
+
+        double remaining = amt;
+        Map<Denomination, Integer> toDispense = new HashMap<>();
+
+        for (Denomination d : values) {
+            int available = denominations.getOrDefault(d, 0);
+            if (available == 0) continue;
+
+            int needed = (int) (remaining / Denomination.getValue(d));
+            int dispenseCount = Math.min(available, needed);
+            if (dispenseCount > 0) {
+                toDispense.put(d, dispenseCount);
+                remaining -= dispenseCount * Denomination.getValue(d);
+                l.add(d);
             }
-            amt -= Denomination.getValue(d) * Math.min(cnt, withDraw);
         }
-        if (amt > 0) throw new AtmException("Please entry in multiples of denomination of: "+ l.stream().map(Entry::getKey).collect(Collectors.toList())toString());
-        if (updateAmount(transaction, bankService, amt)) {
-            updateCash(l);
+
+        if (remaining > 0) {
+            throw new AtmException("Cannot dispense exact amount with available denominations. Please input multiple of denomination: "+ l);
+        }
+
+        toDispense.forEach((denomination, count) -> {
+            denominations.compute(denomination, (k, v) -> v - count);
+        });if (updateAmount(transaction, bankService, -amt)) {
+            updateCash(toDispense);
         }
         else {
-            throw new AtmException("Unable to connect to BankServer");
+            System.out.println("Unable to connect to BankServer");
+            rollback(toDispense);
         }
+        return toDispense;
     }
 
-    private void updateCash(List<Entry> l) {
-        l.forEach(entry -> denominations.compute(entry.denomination, (k,v) -> v + entry.getValue()));
+    private void rollback(Map<Denomination, Integer> l) {
+        l.forEach((key, value) -> denominations.compute(key, (k, v) -> v + value));
+    }
+
+    private void updateCash(Map<Denomination, Integer> l) {
+        l.forEach((key, value) -> denominations.compute(key, (k,v) -> v + value));
     }
 
     private boolean updateAmount(Transaction transaction, BankService bankService, double amt) {
         Account account = bankService.getAccDetails(transaction.getCard().getUserId());
-        return account.setAmount(-amt);
-    }
-
-    public void deposit(Map<Denomination, Integer> map){
-        List<Entry> l = new ArrayList<>();
-        updateCash(map.entrySet().stream().map(entry -> new Entry(entry.getKey(), entry.getValue())).collect(Collectors.toList()));
+        return account.setAmount(amt);
     }
 
     static class Entry{
@@ -246,111 +307,349 @@ class CashDispenser {
 }
 
 interface AtmState {
-    public void insertCard(Card card);
+    public AtmState insertCard();
 
-    public boolean authenticate(BankService bankService);
+    public AtmState authenticate(Transaction transaction, BankService bankService, String pin);
 
-    public boolean cashWithdrawal(double amt, BankService bankService, CashDispenser cashDispenser);
+    AtmState selectTransactionType(Transaction transaction, TransactionType transactionType);
 
-    public boolean cashDeposit(double amt, BankService bankService, CashDispenser cashDispenser);
+    public AtmState cashWithdrawal(Transaction transaction, double amt, BankService bankService, CashDispenser cashDispenser);
 
-    public double balanceInquiry(BankService bankService);
+    AtmState cashDeposit(Transaction transaction, Map<Denomination, Integer> cash, BankService bankService, CashDispenser cashDispenser);
 
-    public void ejectCard();
+    public AtmState balanceInquiry(Transaction transaction, BankService bankService);
+
+    public AtmState ejectCard();
 
 }
 
 class Idle implements AtmState{
-    @Override
-    public void insertCard(Card card) {
+    private static volatile AtmState instance = null;
 
+    public static AtmState getInstance(){
+        if (instance == null){
+            synchronized (AtmState.class){
+                if (instance == null){
+                    instance = new Idle();
+                }
+            }
+        }
+        return instance;
     }
 
     @Override
-    public boolean authenticate(BankService bankService) {
-        return false;
+    public AtmState insertCard() {
+        return CardInserted.getInstance();
     }
 
     @Override
-    public boolean cashWithdrawal(double amt, BankService bankService, CashDispenser cashDispenser) {
-        return false;
+    public AtmState authenticate(Transaction transaction, BankService bankService, String pin) {
+        throw new AtmException("not supported");
     }
 
     @Override
-    public boolean cashDeposit(double amt, BankService bankService, CashDispenser cashDispenser) {
-        return false;
+    public AtmState selectTransactionType(Transaction transaction, TransactionType transactionType) {
+        throw new AtmException("not supported");
     }
 
     @Override
-    public double balanceInquiry(BankService bankService) {
-        return 0;
+    public AtmState cashWithdrawal(Transaction transaction, double amt, BankService bankService, CashDispenser cashDispenser) {
+        throw new AtmException("not supported");
     }
 
     @Override
-    public void ejectCard() {
+    public AtmState cashDeposit(Transaction transaction, Map<Denomination, Integer> cash, BankService bankService, CashDispenser cashDispenser) {
+        throw new AtmException("not supported");
+    }
 
+    @Override
+    public AtmState balanceInquiry(Transaction transaction, BankService bankService) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState ejectCard() {
+        return getInstance();
     }
 }
 class CardInserted implements AtmState{
-    @Override
-    public void insertCard(Card card) {
+    private final int MAX_ATTEMPT = 3;
+    private static volatile AtmState instance = null;
 
+    public static AtmState getInstance(){
+        if (instance == null){
+            synchronized (AtmState.class){
+                if (instance == null){
+                    instance = new CardInserted();
+                }
+            }
+        }
+        return instance;
+    }
+    @Override
+    public AtmState insertCard() {
+        throw new AtmException("not supported");
     }
 
     @Override
-    public boolean authenticate(BankService bankService) {
-        return false;
+    public AtmState authenticate(Transaction transaction, BankService bankService, String pin) {
+        int r = 0;
+        while(r < MAX_ATTEMPT) {
+            if (bankService.authenticate(transaction.getCard().getUserId(), pin)){
+                return Authenticated.getInstance();
+            }
+            r++;
+        }
+        return ejectCard();
     }
 
     @Override
-    public boolean cashWithdrawal(double amt, BankService bankService, CashDispenser cashDispenser) {
-        return false;
+    public AtmState selectTransactionType(Transaction transaction, TransactionType transactionType) {
+        throw new AtmException("not supported");
     }
 
     @Override
-    public boolean cashDeposit(double amt, BankService bankService, CashDispenser cashDispenser) {
-        return false;
+    public AtmState cashWithdrawal(Transaction transaction, double amt, BankService bankService, CashDispenser cashDispenser) {
+        throw new AtmException("not supported");
     }
 
     @Override
-    public double balanceInquiry(BankService bankService) {
-        return 0;
+    public AtmState cashDeposit(Transaction transaction, Map<Denomination, Integer> cash, BankService bankService, CashDispenser cashDispenser) {
+        throw new AtmException("not supported");
     }
 
     @Override
-    public void ejectCard() {
+    public AtmState balanceInquiry(Transaction transaction, BankService bankService) {
+        throw new AtmException("not supported");
+    }
 
+    @Override
+    public AtmState ejectCard() {
+        return Idle.getInstance();
     }
 }
 class Authenticated implements AtmState{
+
+    private static volatile AtmState instance = null;
+
+    public static AtmState getInstance(){
+        if (instance == null){
+            synchronized (AtmState.class){
+                if (instance == null){
+                    instance = new Authenticated();
+                }
+            }
+        }
+        return instance;
+    }
+
     @Override
-    public void insertCard(Card card) {
+    public AtmState insertCard() {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState authenticate(Transaction transaction, BankService bankService, String pin) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState selectTransactionType(Transaction transaction, TransactionType transactionType){
+        transaction.setTransactionType(transactionType);
+        switch (transactionType){
+            case WITHDRAW -> {
+                return CashWithdrawal.getInstance();
+            }
+            case DEPOSIT -> {
+                return CashDeposit.getInstance();
+            }
+            case BALANCE_INQUIRY -> {
+                return BalanceInquiry.getInstance();
+            }
+            default -> {
+                return ejectCard();
+            }
+        }
+    }
+    @Override
+    public AtmState cashWithdrawal(Transaction transaction, double amt, BankService bankService, CashDispenser cashDispenser) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState cashDeposit(Transaction transaction, Map<Denomination, Integer> cash, BankService bankService, CashDispenser cashDispenser) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState balanceInquiry(Transaction transaction, BankService bankService) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState ejectCard() {
+        return Idle.getInstance();
+    }
+}
+
+class CashWithdrawal implements AtmState{
+
+    private static volatile AtmState instance = null;
+
+    public static AtmState getInstance(){
+        if (instance == null){
+            synchronized (AtmState.class){
+                if (instance == null){
+                    instance = new CashWithdrawal();
+                }
+            }
+        }
+        return instance;
+    }
+
+    @Override
+    public AtmState insertCard() {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState authenticate(Transaction transaction, BankService bankService, String pin) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState selectTransactionType(Transaction transaction, TransactionType transactionType) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState cashWithdrawal(Transaction transaction, double amt, BankService bankService, CashDispenser cashDispenser) {
+        Map<Denomination, Integer> cash = cashDispenser.withdraw(transaction, bankService, amt);
+        System.out.println(cash);
+        return ejectCard();
+    }
+
+    @Override
+    public AtmState cashDeposit(Transaction transaction, Map<Denomination, Integer> cash, BankService bankService, CashDispenser cashDispenser) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState balanceInquiry(Transaction transaction, BankService bankService) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState ejectCard() {
+        return Idle.getInstance();
+    }
+}
+
+class CashDeposit implements AtmState{
+
+    private static volatile AtmState instance = null;
+
+    public static AtmState getInstance(){
+        if (instance == null){
+            synchronized (AtmState.class){
+                if (instance == null){
+                    instance = new CashWithdrawal();
+                }
+            }
+        }
+        return instance;
+    }
+
+    @Override
+    public AtmState insertCard() {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState authenticate(Transaction transaction, BankService bankService, String pin) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState selectTransactionType(Transaction transaction, TransactionType transactionType) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState cashWithdrawal(Transaction transaction, double amt, BankService bankService, CashDispenser cashDispenser) {
+        throw new AtmException("not supported");
 
     }
 
     @Override
-    public boolean authenticate(BankService bankService) {
-        return false;
+    public AtmState cashDeposit(Transaction transaction, Map<Denomination, Integer> cash, BankService bankService, CashDispenser cashDispenser) {
+        cashDispenser.deposit(transaction,bankService, cash);
+        return ejectCard();
     }
 
     @Override
-    public boolean cashWithdrawal(double amt, BankService bankService, CashDispenser cashDispenser) {
-        return false;
+    public AtmState balanceInquiry(Transaction transaction, BankService bankService) {
+        throw new AtmException("not supported");
     }
 
     @Override
-    public boolean cashDeposit(double amt, BankService bankService, CashDispenser cashDispenser) {
-        return false;
+    public AtmState ejectCard() {
+        return Idle.getInstance();
+    }
+}
+
+
+
+class BalanceInquiry implements AtmState{
+
+    private static volatile AtmState instance = null;
+
+    public static AtmState getInstance(){
+        if (instance == null){
+            synchronized (AtmState.class){
+                if (instance == null){
+                    instance = new BalanceInquiry();
+                }
+            }
+        }
+        return instance;
     }
 
     @Override
-    public double balanceInquiry(BankService bankService) {
-        return 0;
+    public AtmState insertCard() {
+        throw new AtmException("not supported");
     }
 
     @Override
-    public void ejectCard() {
+    public AtmState authenticate(Transaction transaction, BankService bankService, String pin) {
+        throw new AtmException("not supported");
+    }
 
+    @Override
+    public AtmState selectTransactionType(Transaction transaction, TransactionType transactionType) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState cashWithdrawal(Transaction transaction, double amt, BankService bankService, CashDispenser cashDispenser) {
+        throw new AtmException("not supported");
+    }
+
+    @Override
+    public AtmState cashDeposit(Transaction transaction, Map<Denomination, Integer> cash, BankService bankService, CashDispenser cashDispenser) {
+        throw new AtmException("not supported");
+    }
+
+
+    @Override
+    public AtmState balanceInquiry(Transaction transaction, BankService bankService) {
+        System.out.println(bankService.inquire(transaction.getCard().getUserId()));
+        return ejectCard();
+    }
+
+    @Override
+    public AtmState ejectCard() {
+        return Idle.getInstance();
     }
 }
 
