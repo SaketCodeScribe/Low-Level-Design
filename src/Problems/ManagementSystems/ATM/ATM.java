@@ -36,7 +36,7 @@ public class ATM {
         state = state.cashWithdrawal(transaction, amt, bankService, cashDispenser);
     }
 
-    public void cashDeposit(List<Map.Entry<Denomination, Integer>> cash) {
+    public void cashDeposit(Map<Denomination, Integer> cash) {
         state = state.cashDeposit(transaction, cash, bankService, cashDispenser);
     }
 
