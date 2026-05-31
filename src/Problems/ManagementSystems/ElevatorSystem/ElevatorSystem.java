@@ -4,6 +4,10 @@ import java.util.List;
 import java.util.Observable;
 import java.util.Observer;
 import java.util.Optional;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 public class ElevatorSystem {
 }
@@ -31,6 +35,14 @@ class Request{
     Optional<Direction> direction;
     int floorNo;
 
+}
+
+enum ElevatorState{
+    MovingUp,
+    MovingDown,
+    Idle,
+    DoorOpen,
+    OutOfService;
 }
 
 abstract class ElevatorObservable{
@@ -82,14 +94,48 @@ class Floor{
     Display display;
 }
 
-class IdleElevator extends ElevatorObservable{
-    public IdleElevator(Direction direction, int floorNo) {
-        super(direction, floorNo);
+class Elevator extends ElevatorObservable{
+
+    ElevatorState elevatorState;
+    BlockingQueue<Request> buffer;
+
+    Thread workerThread;
+    public Elevator() {
+        super(Direction.Idle, 0);
+        buffer = new LinkedBlockingQueue<>();
+        workerThread = new Thread(this::move);
+        workerThread.setDaemon(true);
+
     }
+
+    private void setDirection(Direction d){
+        this.direction = d;
+    }
+
+    private void setFloorNo(int f){
+        this.floorNo = f;
+    }
+
+    public void enqueueRequest(Request request){
+        buffer.offer(request);
+    }
+
+    private void move(){
+        while(!Thread.currentThread().isInterrupted()){
+            try {
+                Request request = buffer.poll(1000, TimeUnit.MILLISECONDS);
+                int floorNo = request.floorNo;
+
+            } catch (InterruptedException e) {
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+    }
+
 }
 
-class MovingUpElevator extends ElevatorObservable{
-    public MovingUpElevator(Direction direction, int floorNo) {
-        super(direction, floorNo);
-    }
-}
