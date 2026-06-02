@@ -28,12 +28,12 @@ public class ElevatorSystem{
         OutOfService;
     }
 
-    static class Door{
-        DoorState doorState;
-        boolean pressUp;
-        boolean pressDown;
+    static class Door {
+        volatile DoorState doorState;
 
-        {doorState = DoorState.Close;}
+        {
+            doorState = DoorState.Close;
+        }
 
         public DoorState getDoorState() {
             return doorState;
@@ -42,30 +42,39 @@ public class ElevatorSystem{
         public void setDoorState(DoorState doorState) {
             this.doorState = doorState;
         }
-
-        public void setPressUp() {
-            this.pressUp = true;
-        }
-
-        public void setPressDown() {
-            this.pressDown = true;
-        }
     }
 
     static class Floor{
         int floorNo;
         List<Display> displays;
-        List<Door> doors;
+        boolean pressUp, pressDown;
 
+        public Floor(int floorNo, List<Display> displays) {
+            this.floorNo = floorNo;
+            this.displays = displays;
+        }
+
+        public void setPressUp(boolean pressUp) {
+            this.pressUp = pressUp;
+        }
+
+        public void setPressDown(boolean pressDown) {
+            this.pressDown = pressDown;
+        }
     }
-
+    enum RequestType{
+        Internal,
+        External;
+    }
     static class Request{
         int floorNo;
         Direction direction;
+        RequestType requestType;
 
-        public Request(int floorNo, Direction direction) {
+        public Request(int floorNo, Direction direction, RequestType requestType) {
             this.floorNo = floorNo;
             this.direction = direction;
+            this.requestType = requestType;
         }
 
         public int getFloorNo() {
@@ -74,6 +83,10 @@ public class ElevatorSystem{
 
         public Direction getDirection() {
             return direction;
+        }
+
+        public RequestType getRequestType() {
+            return requestType;
         }
     }
 
@@ -111,11 +124,11 @@ public class ElevatorSystem{
         AtomicInteger currentFloor;
         int elevatorId;
         Door door;
-        Direction direction;
-        ElevatorState state;
+        volatile Direction direction;
+        volatile ElevatorState state;
         List<ElevatorObserver> observers;
-        TreeSet<Integer> upRequests;
-        TreeSet<Integer> downRequests;
+        NavigableSet<Integer> upRequests;
+        NavigableSet<Integer> downRequests;
         int maxFloor;
 
         public Elevator(int elevatorId, int maxFloor){
@@ -125,8 +138,8 @@ public class ElevatorSystem{
             direction = Direction.None;
             state = ElevatorState.Idle;
             observers = new ArrayList<>();
-            upRequests = new TreeSet<>();
-            downRequests = new TreeSet<>();
+            upRequests = Collections.synchronizedNavigableSet(new TreeSet<>());
+            downRequests = Collections.synchronizedNavigableSet(new TreeSet<>());
             this.maxFloor = maxFloor;
 
         }
@@ -136,57 +149,105 @@ public class ElevatorSystem{
 
         private void openDoor(){
             door.setDoorState(DoorState.Open);
-            state = ElevatorState.DoorOpen;
         }
         private void closeDoor(){
             door.setDoorState(DoorState.Close);
-            state = ElevatorState.Idle;
         }
         public void move(int floorNo){
             state = ElevatorState.Moving;
-            while(currentFloor.get() < floorNo){
-                notifyStateChange(this.elevatorId, this.currentFloor.getAndIncrement(), direction);
-                LockSupport.parkNanos(100000);
+            if (currentFloor.get() < floorNo){
+                direction = Direction.Up;
+                while(currentFloor.get() < floorNo){
+                    currentFloor.incrementAndGet();
+                    notifyStateChange(
+                            this.elevatorId,
+                            currentFloor.get(),
+                            direction
+                    );
+                    LockSupport.parkNanos(100000);
+                }
             }
-            notifyStateChange(this.elevatorId, this.currentFloor.getAndIncrement(), direction);
-            LockSupport.parkNanos(100000);
+            else if(currentFloor.get() > floorNo){
+                direction = Direction.Down;
+                while(currentFloor.get() > floorNo){
+                    currentFloor.decrementAndGet();
+                    notifyStateChange(
+                            this.elevatorId,
+                            currentFloor.get(),
+                            direction
+                    );
+                    LockSupport.parkNanos(100000);
+                }
+            }
             openDoor();
             LockSupport.parkNanos(100000);
             closeDoor();
-            state = ElevatorState.Idle;
+
         }
+
 
         public void add(int floorNo){
             if (floorNo < 0) throw new IllegalMoveException("floor can't be negative");
             if (floorNo > maxFloor) throw new IllegalMoveException("floor can't be more than"+ maxFloor);
 
-            if (currentFloor.get() < floorNo) upRequests.add(floorNo);
-            else if (currentFloor.get() > floorNo) downRequests.add(floorNo);
+            if (currentFloor.get() < floorNo){
+                upRequests.add(floorNo);
+            }
+            else if (currentFloor.get() > floorNo){
+                downRequests.add(floorNo);
+            }
+            else{
+                upRequests.add(floorNo);
+            }
        }
 
-       public void run(){
+        public void run(){
             if (upRequests.isEmpty() && downRequests.isEmpty()){
                 state = ElevatorState.Idle;
                 direction = Direction.None;
+                return;
             }
+
+            if (direction == Direction.None){
+                direction = !upRequests.isEmpty()
+                        ? Direction.Up
+                        : Direction.Down;
+            }
+
             if (direction == Direction.Up){
                 Integer next = upRequests.ceiling(currentFloor.get());
                 if (next == null){
                     direction = Direction.Down;
+                    next = downRequests.floor(currentFloor.get());
+                    if (next != null){
+                        move(next);
+                        completeRequest(next);
+                    }
+                    return;
                 }
-                else move(next);
+                move(next);
+                completeRequest(next);
             }
-            else if (direction == Direction.Down){
+            else{
                 Integer next = downRequests.floor(currentFloor.get());
                 if (next == null){
                     direction = Direction.Up;
+                    next = upRequests.ceiling(currentFloor.get());
+                    if (next != null){
+                        move(next);
+                        completeRequest(next);
+                    }
+                    return;
                 }
-                else move(next);
+                move(next);
+                completeRequest(next);
             }
-            else{
-                direction = Direction.Up;
-            }
-       }
+        }
+
+        private void completeRequest(Integer floor) {
+            upRequests.remove(floor);
+            downRequests.remove(floor);
+        }
 
         private void notifyStateChange(int elevatorId, int currentFloor, Direction direction) {
             for(ElevatorObserver observer:observers){
@@ -195,7 +256,7 @@ public class ElevatorSystem{
         }
 
         public void addObserver(ElevatorObserver observer){
-            observers = new ArrayList<>();
+            observers.add(observer);
         }
     }
     static class ElevatorController{
@@ -205,7 +266,7 @@ public class ElevatorSystem{
         public ElevatorController(Elevator elevator) {
             this.elevator = elevator;
             worker = Executors.newFixedThreadPool(1, r -> {
-                Thread t = new Thread("worker thread - "+ elevator.elevatorId);
+                Thread t = new Thread(r, "worker thread - "+ elevator.elevatorId);
                 t.setDaemon(true);
                 return t;
             });
@@ -243,7 +304,7 @@ public class ElevatorSystem{
             int distance = Integer.MAX_VALUE;
 
             public int getScore(){
-                return distance < Integer.MAX_VALUE ? distance : 0;
+                return distance;
             }
 
         }
@@ -262,13 +323,27 @@ public class ElevatorSystem{
             getSameDirectionElevatorController(controllers, direction, floor, sameDirection);
             getOppositeDirectionElevatorController(controllers, direction, floor, oppositeDirection);
 
-            if (idle.getScore() > Math.max(sameDirection.getScore(), oppositeDirection.getScore())){
+            if (idle.controller != null &&
+                    idle.getScore() < Math.min(
+                            sameDirection.getScore() - bonus,
+                            oppositeDirection.getScore())){
                 return idle.controller;
             }
-            if (sameDirection.getScore() > Math.max(idle.getScore(), oppositeDirection.getScore())){
+
+            if (sameDirection.controller != null &&
+                    sameDirection.getScore() - bonus < Math.min(
+                            idle.getScore(),
+                            oppositeDirection.getScore())){
                 return sameDirection.controller;
             }
-            return oppositeDirection.controller;
+
+            if (oppositeDirection.controller != null){
+                return oppositeDirection.controller;
+            }
+
+            throw new IllegalStateException(
+                    "No elevator available"
+            );
         }
 
         private void getOppositeDirectionElevatorController(List<ElevatorController> controllers, Direction direction, int floor, Result result) {
@@ -314,38 +389,26 @@ public class ElevatorSystem{
     ElevatorDispatchStrategy elevatorDispatchStrategy;
     int buildingHeight;
     private static Object lock = new Object();
-    public static ElevatorSystem getInstance(){
+    public static ElevatorSystem getInstance(List<ElevatorController> controllers, List<Display> displays, ElevatorDispatchStrategy elevatorDispatchStrategy, int buildingHeight){
         if (instance == null){
             synchronized (lock){
                 if (instance == null){
-                    instance = new ElevatorSystem();
+                    instance = new ElevatorSystem(controllers, displays, elevatorDispatchStrategy, buildingHeight);
                 }
             }
         }
         return instance;
     }
 
-    public static void setInstance(ElevatorSystem instance) {
-        ElevatorSystem.instance = instance;
-    }
-
-    public void setControllers(List<ElevatorController> controllers) {
+    private ElevatorSystem(List<ElevatorController> controllers, List<Display> displays, ElevatorDispatchStrategy elevatorDispatchStrategy, int buildingHeight) {
         this.controllers = controllers;
-    }
-
-    public void setDisplays(List<Display> displays) {
         this.displays = displays;
-    }
-
-    public void setElevatorDispatchStrategy(ElevatorDispatchStrategy elevatorDispatchStrategy) {
         this.elevatorDispatchStrategy = elevatorDispatchStrategy;
-    }
-
-    public void setBuildingHeight(int buildingHeight) {
         this.buildingHeight = buildingHeight;
     }
-    public Request createRequest(int floorNo, Direction direction){
-        return new Request(floorNo, direction);
+
+    public Request createRequest(int floorNo, Direction direction, RequestType requestType){
+        return new Request(floorNo, direction, requestType);
     }
 
     public void add(Request request){
