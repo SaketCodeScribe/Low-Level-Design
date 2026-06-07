@@ -187,7 +187,6 @@ public class TrafficControlSystem {
     }
 
     interface SignalDispatcher{
-        List<Lane> nextDispatch();
     }
 
     static class TimeBasedDispatcher implements SignalDispatcher{
