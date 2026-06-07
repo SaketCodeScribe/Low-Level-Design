@@ -7,3 +7,5 @@ Problems Covered:
   6. Search Autocomplete System
   7. Simple Search Engine
   8. ATM
+  9. Vending Machine
+  10. Elevator System
