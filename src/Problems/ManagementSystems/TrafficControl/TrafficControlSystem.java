@@ -1,270 +1,333 @@
 package Problems.ManagementSystems.TrafficControl;
 
 import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.LockSupport;
-import java.util.stream.Collectors;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class TrafficControlSystem {
+    enum Light{
+        Green,
+        Yellow,
+        Red;
+    }
     enum Direction{
         North,
         South,
         East,
         West;
     }
-    enum TrafficLight{
-        Green,
-        Red,
-        Yellow;
-    }
-    static class TrafficSignal{
-        AtomicReference<TrafficLight> light;
-        long redWaitTime;
-        long greenWaitTime;
-        long yellowWaitTime;
-
-        public TrafficSignal(long redWaitTime, long greenWaitTime, long yellowWaitTime) {
-            this.redWaitTime = redWaitTime;
-            this.greenWaitTime = greenWaitTime;
-            this.yellowWaitTime = yellowWaitTime;
-        }
-        public void setLight(TrafficLight l){
-            light.set(l);
-        }
-        public TrafficLight getLight(){
-            return light.get();
-        }
-    }
-    static class Directions{
-        private Direction direction;
-        private TrafficSignal trafficSignal;
-
-        public Directions(Direction direction, TrafficSignal signal) {
-            this.direction = direction;
-            this.trafficSignal = signal;
-        }
-
-        public void setDirection(Direction direction) {
-            this.direction = direction;
-        }
-
-        public void setLight(TrafficLight light) {
-            this.trafficSignal.setLight(light);
-        }
-    }
-
-    enum JunctionState{
-        Moving,
-        Stopped;
-    }
-    interface TrafficObserver{
-        void updateChangeState(Junction junction);
-    }
-    static abstract class Junction{
-        String id;
+    static class TrafficLight{
+        SignalState curr;
+        SignalState next;
+        Direction direction;
+        Light currentColor;
         Set<TrafficObserver> observers;
 
-        public Junction(String id) {
-            this.id = id;
-            observers = new HashSet<>();
+        public TrafficLight(SignalState curr, SignalState next, Direction direction) {
+            this.curr = curr;
+            this.next = next;
+            this.direction = direction;
+            this.currentColor = Light.Red;
+            observers = ConcurrentHashMap.newKeySet();
         }
-
+        public static SignalState getGreen(){
+            return GreenState.getInstance();
+        }
+        public static SignalState getYellow(){
+            return YellowState.getInstance();
+        }
+        public static SignalState getRed(){
+            return RedState.getInstance();
+        }
         public void add(TrafficObserver ob){
             observers.add(ob);
         }
         public void remove(TrafficObserver ob){
             observers.remove(ob);
         }
-        public void updateStateChange(){
+        public void setCurrentState(SignalState state){
+            this.curr = state;
+            this.curr.handle(this);
+            notifyStateChange();
+        }
+        public void setNextState(SignalState state){
+            this.next = state;
+        }
+        public void transition(){
+            setCurrentState(this.next);
+        }
+        public void setColor(Light light){
+            this.currentColor = light;
+        }
+        private void notifyStateChange(){
             for(TrafficObserver ob:observers){
-                ob.updateChangeState(this);
+                ob.updateStateChange(this.direction, this.currentColor);
             }
         }
-        public String getJunctionId(){
-            return id;
-        }
 
-        abstract void nextState();
-        abstract JunctionState currentState();
-
-    }
-    static class NorthSouthJunction extends Junction{
-        private AtomicReference<JunctionState> state;
-
-        public NorthSouthJunction(JunctionState state, String id) {
-            super(id);
-            this.state = new AtomicReference<>(state);
-        }
-
-        public void nextState(){
-            state.set(state.get() == JunctionState.Moving ? JunctionState.Stopped : JunctionState.Moving);
-        }
-        public JunctionState currentState(){
-            return state.get();
+        public void forceRed() {
+            setCurrentState(RedState.getInstance());
         }
     }
-
-    static class EastWestJunction extends Junction{
-        private AtomicReference<JunctionState> state;
-
-        public EastWestJunction(JunctionState state, String id) {
-            super(id);
-            this.state = new AtomicReference<>(state);
-        }
-
-        public void nextState(){
-            state.set(state.get() == JunctionState.Moving ? JunctionState.Stopped : JunctionState.Moving);
-        }
-        public JunctionState currentState(){
-            return state.get();
-        }
+    static interface SignalState{
+        void handle(TrafficLight context);
     }
-    static class SouthNorthJunction extends Junction{
-        private AtomicReference<JunctionState> state;
-
-        public SouthNorthJunction(JunctionState state, String id) {
-            super(id);
-            this.state = new AtomicReference<>(state);
+    static class GreenState implements SignalState{
+        private static volatile SignalState instance = null;
+        private static Object lock = new Object();
+        public static SignalState getInstance(){
+            if (instance == null){
+                synchronized (lock){
+                    if (instance == null){
+                        instance = new GreenState();
+                    }
+                }
+            }
+            return instance;
         }
-
-        public void nextState(){
-            state.set(state.get() == JunctionState.Moving ? JunctionState.Stopped : JunctionState.Moving);
-        }
-        public JunctionState currentState(){
-            return state.get();
-        }
-    }
-    static class WestEastJunction extends Junction{
-        private AtomicReference<JunctionState> state;
-
-        public WestEastJunction(JunctionState state, String id) {
-            super(id);
-            this.state = new AtomicReference<>(state);
-        }
-
-        public void nextState(){
-            state.set(state.get() == JunctionState.Moving ? JunctionState.Stopped : JunctionState.Moving);
-        }
-        public JunctionState currentState(){
-            return state.get();
-        }
-    }
-    static class TrafficMonitoring implements TrafficObserver{
         @Override
-        public void updateChangeState(Junction junction) {
-            System.out.println(junction.getJunctionId()+" - "+junction.currentState());
+        public void handle(TrafficLight context) {
+            context.setColor(Light.Green);
         }
     }
-    static class TrafficController {
-        Map<Direction, Junction> junctionMap;
-        List<Directions> directions;
-
-        public TrafficController(Map<Direction, Junction> junctionMap) {
-            this.junctionMap = junctionMap;
-        }
-
-        public void updateState(Directions directions, TrafficLight light) {
-            directions.trafficSignal.setLight(light);
-            Junction junction = junctionMap.get(directions.direction);
-            if (directions.trafficSignal.getLight() == TrafficLight.Green || directions.trafficSignal.getLight() == TrafficLight.Red) {
-                junction.nextState();
+    static class RedState implements SignalState{
+        private static volatile SignalState instance = null;
+        private static Object lock = new Object();
+        public static SignalState getInstance(){
+            if (instance == null){
+                synchronized (lock){
+                    if (instance == null){
+                        instance = new RedState();
+                    }
+                }
             }
+            return instance;
+        }
+        @Override
+        public void handle(TrafficLight context) {
+            context.setColor(Light.Red);
         }
     }
-    interface SignalDispatcher{
-        void run();
-        TrafficController getController();
-        void close();
-    }
-    static class TimeBasedSignalDispatcher implements SignalDispatcher{
-        TrafficController controller;
-        AtomicBoolean isRunning;
-        public TimeBasedSignalDispatcher(TrafficController controller) {
-            this.controller = controller;
+    static class YellowState implements SignalState{
+        private static volatile SignalState instance = null;
+        private static Object lock = new Object();
+        public static SignalState getInstance(){
+            if (instance == null){
+                synchronized (lock){
+                    if (instance == null){
+                        instance = new YellowState();
+                    }
+                }
+            }
+            return instance;
         }
+        @Override
+        public void handle(TrafficLight context) {
+            context.setColor(Light.Yellow);
+        }
+    }
+    interface TrafficObserver{
+        void updateStateChange(Direction direction, Light currentColor);
 
+    }
+    static class TrafficMonitor implements TrafficObserver{
+        @Override
+        public void updateStateChange(Direction direction, Light currentColor) {
+            System.out.println(direction+" "+currentColor);
+        }
+    }
+
+    static class IntersectionController{
+        private long greenWaitTime;
+        private long yellowWaitTime;
+        private Map<Direction, TrafficLight> map;
+        private IntersectionState state;
+        private ExecutorService ex;
+        private volatile boolean isRunning;
+
+        public IntersectionController(long greenWaitTime, long yellowWaitTime, Map<Direction, TrafficLight> map, IntersectionState state) {
+            this.greenWaitTime = greenWaitTime;
+            this.yellowWaitTime = yellowWaitTime;
+            this.map = map;
+            this.state = state;
+            ex = Executors.newFixedThreadPool(1);
+            isRunning = true;
+        }
+        public TrafficLight getTrafficLight(Direction d){return map.get(d);}
+        public void start(){
+            ex.submit(this::run);
+        }
         public void run(){
-            List<Directions> green, red, yellow;
-            green = new ArrayList<>();
-            red = new ArrayList<>();
-            yellow = new ArrayList<>();
-            isRunning = new AtomicBoolean(true);
-            while(true){
-                if (!isRunning.get()) {
-                    for (Directions d : green) {
-                        controller.updateState(d, TrafficLight.Red);
-                    }
-                    break;
-                }
-                for(Directions d: controller.directions){
-                    switch (d.trafficSignal.getLight()){
-                        case Red -> red.add(d);
-                        case Green -> green.add(d);
-                        case Yellow -> yellow.add(d);
-                        default -> throw new IllegalStateException("undefined traffic light: "+d.trafficSignal.getLight());
-                    }
-                }
-                try {
-                    if (!green.isEmpty()){
-                        Thread.sleep(green.get(0).trafficSignal.greenWaitTime);
-                        for(Directions d:green){controller.updateState(d, TrafficLight.Yellow);}
-                    }
-                    else if (!yellow.isEmpty()){
-                        Thread.sleep(yellow.get(0).trafficSignal.yellowWaitTime);
-                        for(Directions d:yellow){controller.updateState(d, TrafficLight.Red);}
-                    }
-                    else {
-                        Thread.sleep(red.get(0).trafficSignal.redWaitTime);
-                        for(Directions d: red){controller.updateState(d, TrafficLight.Green);}
-                    }
-
-                }catch (InterruptedException e) {
-                    for (Directions d:controller.directions) controller.updateState(d, TrafficLight.Red);
-                    throw new RuntimeException(e);
+            while (isRunning){
+                this.state = this.state.handle(this);
+            }
+        }
+        public void stop(){
+            isRunning = false;
+            ex.shutdownNow();
+            try{
+                ex.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            } finally {
+                for(Map.Entry<Direction, TrafficLight> entry: map.entrySet()){
+                    entry.getValue().forceRed();
                 }
             }
         }
 
-        @Override
-        public TrafficController getController() {
-            return controller;
+        public void add(TrafficObserver ob){
+            for(var entry:map.entrySet()){
+                entry.getValue().add(ob);
+            }
+        }
+        public void remove(TrafficObserver ob){
+            for(var entry:map.entrySet()){
+                entry.getValue().remove(ob);
+            }
         }
 
-        public void close(){
-            isRunning.set(false);
+        public static Builder builder(){
+            return new Builder();
+        }
+        static class Builder{
+            private long greenWaitTime = 45;
+            private long yellowWaitTime = 15;
+            private Map<Direction, TrafficLight> map;
+            private IntersectionState state;
+            public Builder withGreenWaitTime(long delay){
+                this.greenWaitTime = delay;
+                return this;
+            }
+            public Builder withYellowWaitTime(long delay){
+                this.yellowWaitTime = delay;
+                return this;
+            }
+            public Builder withTrafficLight(List<TrafficLight> trafficLights){
+                this.map = new HashMap<>();
+                trafficLights.forEach(t -> this.map.putIfAbsent(t.direction, t));
+                return this;
+            }
+            public Builder withIntersectionState(IntersectionState state){
+                this.state = state;
+                return this;
+            }
+            public IntersectionController build(){
+                return new IntersectionController(greenWaitTime, yellowWaitTime, map, state);
+            }
         }
     }
+    static interface IntersectionState{
+        IntersectionState handle(IntersectionController context);
+    }
+    static class NorthSourIntersectionState implements IntersectionState{
+        private final IntersectionState next = EastWestIntersectionState.getInstance();
+        private static volatile IntersectionState instance  = null;
+        private static Object lock = new Object();
+        public static IntersectionState getInstance(){
+            if (instance == null){
+                synchronized (lock){
+                    if (instance == null){
+                        instance = new NorthSourIntersectionState();
+                    }
+                }
+            }
+            return instance;
+        }
+        @Override
+        public IntersectionState handle(IntersectionController context) {
+            try {
+                context.getTrafficLight(Direction.North).setCurrentState(TrafficLight.getGreen());
+                context.getTrafficLight(Direction.South).setCurrentState(TrafficLight.getGreen());
+                context.getTrafficLight(Direction.North).setNextState(TrafficLight.getYellow());
+                context.getTrafficLight(Direction.South).setNextState(TrafficLight.getYellow());
 
-    List<TimeBasedSignalDispatcher> dispatchers;
-    List<Thread> threads;
+                Thread.sleep(context.greenWaitTime);
+                context.getTrafficLight(Direction.North).transition();
+                context.getTrafficLight(Direction.South).transition();
+                context.getTrafficLight(Direction.North).setNextState(TrafficLight.getRed());
+                context.getTrafficLight(Direction.South).setNextState(TrafficLight.getRed());
+                Thread.sleep(context.yellowWaitTime);
 
-    public TrafficControlSystem(List<TrafficController> controllers) {
-        dispatchers = new ArrayList<>();
-        controllers.forEach(controller -> dispatchers.add(new TimeBasedSignalDispatcher(controller)));
-        threads = new ArrayList<>();
+                context.getTrafficLight(Direction.North).transition();
+                context.getTrafficLight(Direction.South).transition();
+                return next;
+
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+    static class EastWestIntersectionState implements IntersectionState{
+        private final IntersectionState next = NorthSourIntersectionState.getInstance();
+        private static volatile IntersectionState instance  = null;
+        private static Object lock = new Object();
+        public static IntersectionState getInstance(){
+            if (instance == null){
+                synchronized (lock){
+                    if (instance == null){
+                        instance = new EastWestIntersectionState();
+                    }
+                }
+            }
+            return instance;
+        }
+
+        @Override
+        public IntersectionState handle(IntersectionController context) {
+            try {
+                context.getTrafficLight(Direction.East).setCurrentState(TrafficLight.getGreen());
+                context.getTrafficLight(Direction.West).setCurrentState(TrafficLight.getGreen());
+                context.getTrafficLight(Direction.East).setNextState(TrafficLight.getYellow());
+                context.getTrafficLight(Direction.West).setNextState(TrafficLight.getYellow());
+
+                Thread.sleep(context.greenWaitTime);
+                context.getTrafficLight(Direction.East).transition();
+                context.getTrafficLight(Direction.West).transition();
+                context.getTrafficLight(Direction.East).setNextState(TrafficLight.getRed());
+                context.getTrafficLight(Direction.West).setNextState(TrafficLight.getRed());
+                Thread.sleep(context.yellowWaitTime);
+
+                context.getTrafficLight(Direction.East).transition();
+                context.getTrafficLight(Direction.West).transition();
+                return next;
+
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+    List<IntersectionController> controllers;
+
+    public TrafficControlSystem(long greenWaitTime, long yellowWaitTime, List<List<TrafficLight>> trafficLights){
+        controllers = new ArrayList<>();
+
+        for(List<TrafficLight> light:trafficLights){
+            controllers.add(IntersectionController.builder()
+                    .withGreenWaitTime(greenWaitTime)
+                    .withYellowWaitTime(yellowWaitTime)
+                    .withTrafficLight(light)
+                    .withIntersectionState(NorthSourIntersectionState.getInstance())
+                    .build());
+        }
+
     }
 
     public void start(){
-        for(SignalDispatcher dispatcher:dispatchers){
-            TrafficController controller = dispatcher.getController();
-            for(Directions d:controller.directions){
-                if (d.direction == Direction.North || d.direction == Direction.South){
-                    controller.updateState(d, TrafficLight.Green);
-                }
-            }
-            Thread th = new Thread(dispatcher::run);
-            th.setDaemon(true);
-            th.start();
-            threads.add(th);
-        }
-    }
-    public void stop(){
-        for(SignalDispatcher dispatcher:dispatchers){
-            dispatcher.close();
+        for(IntersectionController controller:controllers){
+            controller.start();
         }
     }
 
+    public void subscribe(TrafficObserver ob){
+        for(IntersectionController controller:controllers){
+            controller.add(ob);
+        }
+    }
+
+    public void remove(IntersectionController controller, TrafficObserver ob){
+        controller.remove(ob);
+    }
 }
