@@ -1,4 +1,4 @@
-package Problems.ManagementSystems.ATM;
+package Problems.ManagingStates.ATM;
 
 import java.util.ArrayList;
 import java.util.HashMap;

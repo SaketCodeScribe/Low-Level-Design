@@ -1,4 +1,4 @@
-package Problems.ManagementSystems.ElevatorSystem;
+package Problems.ManagingStates.ElevatorSystem;
 
 import Problems.Game.ChessGame.IllegalMoveException;
 

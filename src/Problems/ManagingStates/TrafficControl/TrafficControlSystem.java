@@ -1,4 +1,4 @@
-package Problems.ManagementSystems.TrafficControl;
+package Problems.ManagingStates.TrafficControl;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;

@@ -1,4 +1,4 @@
-package Problems.ManagementSystems.VendingMachine;
+package Problems.ManagingStates.VendingMachine;
 
 import java.util.HashMap;
 import java.util.List;
