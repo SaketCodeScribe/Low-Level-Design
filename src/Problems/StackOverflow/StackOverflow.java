@@ -471,30 +471,6 @@ public class StackOverflow {
             searchService.removePost(post);
         }
 
-        public void upvoteQuestion(long ownerId){
-            User user = userService.getUser(ownerId);
-            if (user == null) return;
-            voterService.updateReputation(user, ReputationEvent.Question_UpVote);
-        }
-
-        public void downvoteQuestion(long ownerId){
-            User user = userService.getUser(ownerId);
-            if (user == null) return;
-            voterService.updateReputation(user, ReputationEvent.Question_DownVote);
-        }
-
-        public void upvoteAnswer(long ownerId){
-            User user = userService.getUser(ownerId);
-            if (user == null) return;
-            voterService.updateReputation(user, ReputationEvent.Answer_UpVote);
-        }
-
-        public void downvoteAnswer(long ownerId){
-            User user = userService.getUser(ownerId);
-            if (user == null) return;
-            voterService.updateReputation(user, ReputationEvent.Answer_DownVote);
-        }
-
         public List<String> getReplies(long postId){
             return postService.getAllReplies(postId);
         }
