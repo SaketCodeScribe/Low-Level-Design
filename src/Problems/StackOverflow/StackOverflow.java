@@ -29,7 +29,7 @@ import java.util.stream.Collectors;
 public class StackOverflow {
     enum VoteType{
         UP,
-        DOWN;
+        DOWN, NONE;
     }
     enum ReputationEvent {
         Question_Creation(5),
@@ -152,20 +152,16 @@ public class StackOverflow {
             return postId;
         }
 
-        public synchronized boolean vote(long userId, VoteType voteType){
-            if (Long.compare(userId, this.getOwnerId()) == 0) return false;
-            switch (voteType){
-                case UP -> {
-                    downVote.remove(userId);
-                    upVote.add(userId);
-                }
-                case DOWN -> {
-                    upVote.remove(userId);
-                    downVote.add(userId);
-                }
-                default -> throw new IllegalStateException("Undefined vote type: "+voteType);
+        public synchronized VoteType vote(long userId, VoteType voteType) {
+            if (Long.compare(userId, this.getOwnerId()) == 0) return null; // null = rejected
+            VoteType previous = upVote.contains(userId) ? VoteType.UP
+                    : downVote.contains(userId) ? VoteType.DOWN
+                    : VoteType.NONE;
+            switch (voteType) {
+                case UP   -> { downVote.remove(userId); upVote.add(userId); }
+                case DOWN -> { upVote.remove(userId);  downVote.add(userId); }
             }
-            return true;
+            return previous; // NONE = first vote, UP/DOWN = switching from prior vote
         }
 
         @Override
@@ -303,11 +299,13 @@ public class StackOverflow {
             return posts.get(id);
         }
 
-        public void vote(long postId, long userId, VoteType voteType){
-            posts.computeIfPresent(postId, (k,v) -> {
-                v.vote(userId, voteType);
+        public VoteType vote(long postId, long userId, VoteType voteType) {
+            VoteType[] result = { null };
+            posts.computeIfPresent(postId, (k, v) -> {
+                result[0] = v.vote(userId, voteType);
                 return v;
             });
+            return result[0];
         }
     }
     static class VoterService{
@@ -354,7 +352,7 @@ public class StackOverflow {
         public List<Long> getPosts(String keyword){
             Set<Long> posts = new HashSet<>();
             for(String word:keyword.split(" ")){
-                posts.addAll(wordToPost.getOrDefault(word, Collections.EMPTY_SET));
+                posts.addAll(wordToPost.getOrDefault(word, Collections.<Long>emptySet()));
             }
             return posts.stream().filter(Objects::nonNull).collect(Collectors.toList());
         }
@@ -362,7 +360,7 @@ public class StackOverflow {
         public List<Long> getPostsFromTags(List<String> tags){
             Set<Long> posts = new HashSet<>();
             for(String tag:tags){
-                posts.addAll(tagToPost.getOrDefault(tag, Collections.EMPTY_SET));
+                posts.addAll(tagToPost.getOrDefault(tag, Collections.<Long>emptySet()));
             }
             return posts.stream().filter(Objects::nonNull).collect(Collectors.toList());
         }
@@ -516,16 +514,33 @@ public class StackOverflow {
             return posts.stream().map(Post::getContent).collect(Collectors.toList());
         }
 
-        public void vote(long postId, long userId, VoteType voteType){
+        public void vote(long postId, long userId, VoteType voteType) {
             User user = userService.getUser(userId);
             if (user == null) return;
             Post post = postService.getPost(postId);
             if (post == null) return;
             User owner = userService.getUser(post.getOwnerId());
-            postService.vote(postId, userId, voteType);
+            if (owner == null) return;
+
+            VoteType previousVote = postService.vote(postId, userId, voteType);
+            if (previousVote == null) return; // self-vote rejected, don't touch reputation
             if (post instanceof Comment) return;
-            voterService.updateReputation(owner, voteType == VoteType.UP ? (post instanceof Question ? ReputationEvent.Question_UpVote : ReputationEvent.Answer_UpVote) :
-                    (post instanceof Question ? ReputationEvent.Question_DownVote : ReputationEvent.Answer_DownVote));
+
+            boolean isQuestion = post instanceof Question;
+
+            // Reverse old vote's reputation effect
+            if (previousVote != VoteType.NONE) {
+                ReputationEvent oldEvent = previousVote == VoteType.UP
+                        ? (isQuestion ? ReputationEvent.Question_UpVote   : ReputationEvent.Answer_UpVote)
+                        : (isQuestion ? ReputationEvent.Question_DownVote : ReputationEvent.Answer_DownVote);
+                owner.updateReputation(-oldEvent.getDelta());
+            }
+
+            // Apply new vote's reputation effect
+            ReputationEvent newEvent = voteType == VoteType.UP
+                    ? (isQuestion ? ReputationEvent.Question_UpVote   : ReputationEvent.Answer_UpVote)
+                    : (isQuestion ? ReputationEvent.Question_DownVote : ReputationEvent.Answer_DownVote);
+            voterService.updateReputation(owner, newEvent);
         }
     }
 
