@@ -311,10 +311,6 @@ public class StackOverflow {
         }
     }
     static class VoterService{
-        Set<User> users;
-        {
-            users = ConcurrentHashMap.newKeySet();
-        }
         public void updateReputation(User user, ReputationEvent reputationEvent){
             user.updateReputation(reputationEvent.getDelta());
         }
