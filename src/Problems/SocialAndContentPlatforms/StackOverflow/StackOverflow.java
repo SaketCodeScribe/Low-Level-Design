@@ -1,4 +1,4 @@
-package Problems.StackOverflow;
+package Problems.SocialAndContentPlatforms.StackOverflow;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
