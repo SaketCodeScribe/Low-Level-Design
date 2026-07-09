@@ -443,10 +443,10 @@ public class SocialNetwork {
 
         public void removePostsWhenUnfriended(User userA, User userB){
             for(Post post:userA.getPosts()) {
-                userA.getFeed().removeUserPost(post);
+                removePostOfUserAinUserB(userA, userB, post.getPostId());
             }
             for(Post post: userB.getPosts()){
-                userB.getFeed().removeUserPost(post);
+                removePostOfUserAinUserB(userB, userA, post.getPostId());
             }
         }
 
