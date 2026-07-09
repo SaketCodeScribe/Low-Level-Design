@@ -89,7 +89,7 @@ public class SocialNetwork {
         }
 
         public synchronized List<Map.Entry<UserAction, Object>> getNotifications(){
-            lastChecked = getNotifications().size()-1;
+            lastChecked = notifications.size()-1;
             return notifications;
         }
 
@@ -110,7 +110,8 @@ public class SocialNetwork {
         }
 
         public synchronized Post createPost(String postId, String content){
-            return posts.putIfAbsent(postId, new TextPost(postId, content, this));
+            posts.putIfAbsent(postId, new TextPost(postId, content, this));
+            return posts.get(postId);
         }
 
         public Post getPost(String postId){
@@ -283,7 +284,10 @@ public class SocialNetwork {
 
         public Feed(int capacity) {
             this.capacity = capacity;
-            this.buffer = new TreeSet<>((a,b) -> Long.compare(b.getCreationTimestamp(), a.getCreationTimestamp()));
+            this.buffer = new TreeSet<>((a,b) -> {
+                int value = Long.compare(b.getCreationTimestamp(), a.getCreationTimestamp());
+                return value == 0 ? a.getPostId().compareTo(b.getPostId()) : value;
+            });
         }
         public synchronized void offer(Post post){
             if (buffer.size() >= capacity) buffer.remove(buffer.last());
@@ -303,9 +307,7 @@ public class SocialNetwork {
         @Override
         public void updateStateChange(User user, UserAction userAction, Object msg) {
             if (userAction != UserAction.POST_CREATION) {
-                for(User friend:user.getFriends()){
-                    friend.addNotification(Map.entry(userAction, msg));
-                }
+                user.addNotification(Map.entry(userAction, msg));
             }
         }
     }
@@ -439,7 +441,7 @@ public class SocialNetwork {
             return user.getFeed().getUserFeed();
         }
 
-        public void removeAllPostsFromUsersFeed(User userA, User userB){
+        public void removePostsWhenUnfriended(User userA, User userB){
             for(Post post:userA.getPosts()) {
                 userA.getFeed().removeUserPost(post);
             }
@@ -486,46 +488,55 @@ public class SocialNetwork {
             Post post = user.createPost(postId, content);
             posts.putIfAbsent(postId, post);
             users.putIfAbsent(postId, user.getId());
-            notifyAllObservers(UserAction.POST_CREATION, user, user.getName()+" created post "+ postId);
+            notifyAllObservers(UserAction.POST_CREATION, user, post);
         }
 
-        private void notifyAllObservers(UserAction action, User user, String msg) {
+        private void notifyAllObservers(UserAction action, User user, Object msg) {
             observers.forEach(observer -> observer.updateStateChange(user, action, msg));
         }
 
-        public String deletePost(String postId, UserService userService){
-            String userId = users.get(postId);
-            if (userId == null) return "";
-            userService.deleteUserPost(userId, postId);
+        public void deletePost(String postId){
             posts.remove(postId);
-            return userId;
+            users.remove(postId);
         }
 
         public Post getPost(String postId){
             return posts.get(postId);
         }
 
-        public void likePost(User actor, String postId){
+        public void likePost(User actor, String postId, UserService userService){
             Post post = posts.get(postId);
+            if (post == null) return;
+            User owner = userService.getUser(users.get(postId));
+            if (owner == null) return;
             post.likePost(actor.getId());
-            notifyAllObservers(UserAction.LIKE, actor, actor.getName()+" liked your post");
+            notifyAllObservers(UserAction.LIKE, owner, actor.getName()+" liked your post");
         }
 
-        public void dislikePost(User actor, String postId){
+        public void dislikePost(User actor, String postId,  UserService userService){
             Post post = posts.get(postId);
+            if (post == null) return;
+            User owner = userService.getUser(users.get(postId));
+            if (owner == null) return;
             post.dislikePost(actor.getId());
-            notifyAllObservers(UserAction.DISLIKE, actor, actor.getName()+" disliked your post");
+            notifyAllObservers(UserAction.DISLIKE, owner, actor.getName()+" disliked your post");
         }
 
         public void removeReaction(User actor, Post post){
             post.removeReactionFromUser(actor.getId());
         }
 
-        public void addComment(String postId, User actor, String comment, long commentId){
+        public void addComment(String postId, User actor, UserService userService, String comment, long commentId){
             Post post = posts.get(postId);
             if (post == null) return;
+            User owner = userService.getUser(users.get(postId));
+            if (owner == null) return;
             post.addComment(actor, comment, commentId);
-            notifyAllObservers(UserAction.COMMENT, actor, actor.getName()+" added comment on your post");
+            notifyAllObservers(UserAction.COMMENT, owner, actor.getName()+" added comment on your post");
+        }
+
+        public String getUser(String postId) {
+            return users.get(postId);
         }
     }
 
@@ -541,7 +552,7 @@ public class SocialNetwork {
             if (instance == null){
                 synchronized (lock){
                     if (instance == null){
-                        instance = new SocialNetworkFacade(new UserService(), new FeedService(), new NotificationService(), new PostService());
+                        instance = new SocialNetworkFacade(UserService.getInstance(), FeedService.getInstance(), NotificationService.getInstance(), PostService.getInstance());
                     }
                 }
             }
@@ -552,6 +563,9 @@ public class SocialNetwork {
             this.feedService = feedService;
             this.notificationService = notificationService;
             this.postService = postService;
+            postService.addObserver(new FeedObserver());
+            postService.addObserver(new NotificationObserver());
+            userService.addObserver(new NotificationObserver());
         }
 
         public void registerUser(String name, String email){
@@ -564,12 +578,14 @@ public class SocialNetwork {
             }
         }
         public synchronized void deletePost(String postId){
-            String userId = postService.deletePost(postId, userService);
+            String userId = postService.getUser(postId);
             User user = userService.getUser(userId);
             if (user != null) {
                 for (User friend : user.getFriends()) {
                     feedService.removePostOfUserAinUserB(user, friend, postId);
                 }
+                postService.deletePost(postId);
+                userService.deleteUserPost(userId, postId);
             }
         }
         public synchronized void sendFriendRequest(String senderId, String receiverId){
@@ -582,7 +598,7 @@ public class SocialNetwork {
             User sender = userService.getUser(senderId);
             User receiver = userService.getUser(receiverId);
             if (sender == null || receiver == null) return;
-            userService.addUserAsFriend(sender, receiver);
+            userService.addUserAsFriend(receiver, sender);
         }
         public void cancelFriendRequest(String receiverId, String senderId){
             User sender = userService.getUser(senderId);
@@ -590,25 +606,26 @@ public class SocialNetwork {
             if (sender == null || receiver == null) return;
             userService.cancelFriendRequest(sender, receiver);
         }
-        public void removeFriend(String friendId, String userId){
+        public synchronized void removeFriend(String friendId, String userId){
             User user = userService.getUser(userId);
             User friend = userService.getUser(friendId);
             if (user == null || friend == null) return;
             userService.removeUserAsFriend(user, friend);
+            feedService.removePostsWhenUnfriended(user, friend);
         }
         public synchronized void reactOnPost(String postId, String userId, UserAction userAction){
             User user = userService.getUser(userId);
             Post post = postService.getPost(postId);
             if (user == null || post == null) return;
             switch (userAction){
-                case LIKE -> postService.likePost(user, postId);
-                case DISLIKE -> postService.dislikePost(user, postId);
+                case LIKE -> postService.likePost(user, postId, userService);
+                case DISLIKE -> postService.dislikePost(user, postId, userService);
             }
         }
         public synchronized void addCommentOnPost(String commenterId, String postId, String comment, long commentId){
             User commenter = userService.getUser(commenterId);
             if (commenter != null) {
-                postService.addComment(postId, commenter, comment, commentId);
+                postService.addComment(postId, commenter, userService, comment, commentId);
             }
         }
 
