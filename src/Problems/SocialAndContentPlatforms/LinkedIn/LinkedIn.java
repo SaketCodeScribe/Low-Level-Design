@@ -2,6 +2,7 @@ package Problems.SocialAndContentPlatforms.LinkedIn;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 /**
  * FRs:
@@ -207,14 +208,37 @@ public class LinkedIn {
         }
     }
 
-    static class PostAction extends UserAction {
-        public PostAction(User owner, User connection, Post post) {
+    static class PostCreationAction extends UserAction {
+        public PostCreationAction(User owner, User connection, Post post) {
             super(owner, connection, post);
         }
 
         @Override
         public String showNotification() {
             return owner + " create a post" + post;
+        }
+    }
+
+
+    static class RemoveConnectionAction extends UserAction {
+        public RemoveConnectionAction(User owner, User connection, Post post) {
+            super(owner, connection, post);
+        }
+
+        @Override
+        public String showNotification() {
+            return null;
+        }
+    }
+
+    static class PostDeletionAction extends UserAction {
+        public PostDeletionAction(User user, Post post) {
+            super(user, user, post);
+        }
+
+        @Override
+        public String showNotification() {
+            return null;
         }
     }
 
@@ -287,7 +311,7 @@ public class LinkedIn {
         Map<String, User> user;
         Map<String, Map<Integer, User.WorkExperience>> userWorkExp;
 
-        public UserManagementService() {
+        private UserManagementService() {
             user = new ConcurrentHashMap<>();
             userWorkExp = new ConcurrentHashMap<>();
         }
@@ -352,7 +376,7 @@ public class LinkedIn {
 
         Set<Observer> observers;
 
-        public ConnectionManagementService() {
+        private ConnectionManagementService() {
             connections = new HashMap<>();
             pendingRequests = new HashMap<>();
             observers = ConcurrentHashMap.newKeySet();
@@ -405,10 +429,11 @@ public class LinkedIn {
                 value.remove(userB.getUserId());
                 return value;
             });
+            notifyAllObservers(new RemoveConnectionAction(userA, userB, null));
         }
 
         public Set<String> getUserConnections(String userId) {
-            return connections.get(userId);
+            return connections.getOrDefault(userId, Collections.emptySet());
         }
 
         private void notifyAllObservers(UserAction action) {
@@ -428,7 +453,7 @@ public class LinkedIn {
         Map<String, Set<User>> likes;
         Set<Observer> observers;
 
-        public PostManagementService() {
+        private PostManagementService() {
             userPosts = new HashMap<>();
             posts = new ConcurrentHashMap<>();
             observers = ConcurrentHashMap.newKeySet();
@@ -460,14 +485,17 @@ public class LinkedIn {
             User user = userManagementService.getUser(userId);
             Post post = posts.putIfAbsent(postId, new UserPost(postId, user, content));
             userPosts.computeIfAbsent(user.getUserId(), k -> new HashSet<>()).add(postId);
+
+            notifyAllObservers(new PostCreationAction(user, user, post));
             for (String connection : connectionManagementService.getUserConnections(user.getUserId())) {
-                notifyAllObservers(new PostAction(userManagementService.getUser(connection), user, post));
+                notifyAllObservers(new PostCreationAction(userManagementService.getUser(connection), user, post));
             }
         }
 
-        public synchronized void removePost(User user, String postId) {
-            posts.remove(postId);
+        public synchronized void deletePost(User user, String postId) {
+            Post post = posts.remove(postId);
             userPosts.get(user.getUserId()).remove(postId);
+            notifyAllObservers(new PostDeletionAction(user, post));
         }
 
         public synchronized void likePost(String postId, User actor) {
@@ -520,7 +548,7 @@ public class LinkedIn {
         Map<String, Set<String>> replies;
         Set<Observer> observers;
 
-        public CommentManagementService() {
+        private CommentManagementService() {
             this.postComments = new HashMap<>();
             this.comments = new HashMap<>();
             this.replies = new HashMap<>();
@@ -571,20 +599,20 @@ public class LinkedIn {
         }
     }
 
-    static class NotificationService implements Observer {
-        private static volatile NotificationService instance = null;
+    static class NotificationManagementService implements Observer {
+        private static volatile NotificationManagementService instance = null;
         private static Object lock = new Object();
         Map<String, List<UserAction>> userNotifications;
 
-        public NotificationService() {
+        private NotificationManagementService() {
             this.userNotifications = new ConcurrentHashMap<>();
         }
 
-        public static NotificationService getInstance() {
+        public static NotificationManagementService getInstance() {
             if (instance == null) {
                 synchronized (lock) {
                     if (instance == null) {
-                        instance = new NotificationService();
+                        instance = new NotificationManagementService();
                     }
                 }
             }
@@ -593,7 +621,7 @@ public class LinkedIn {
 
         @Override
         public void updateStateChange(UserAction action) {
-            if (action.getOwner() == null) return;
+            if (action.getOwner() == null || action instanceof RemoveConnectionAction) return;
             userNotifications
                     .computeIfAbsent(action.getOwner().getUserId(), k -> Collections.synchronizedList(new ArrayList<>()))
                     .add(action);
@@ -605,8 +633,175 @@ public class LinkedIn {
         }
     }
 
-    static class FeedService {
+    static class FeedManagementService implements Observer {
+        private static volatile FeedManagementService instance = null;
+        private static Object lock = new Object();
+        private final PostManagementService pms;
+        private final UserManagementService ums;
+        private final ConnectionManagementService cms;
+        private final Map<String, Set<String>> userFeed;
+        private Integer capacity;
 
+        private FeedManagementService() {
+            userFeed = new HashMap<>();
+            this.pms = PostManagementService.getInstance();
+            this.ums = UserManagementService.getInstance();
+            this.cms = ConnectionManagementService.getInstance();
+        }
+
+        public static FeedManagementService getInstance() {
+            if (instance == null) {
+                synchronized (lock) {
+                    if (instance == null) {
+                        instance = new FeedManagementService();
+                    }
+                }
+            }
+            return instance;
+        }
+
+        public void setCapacity(int capacity) {
+            if (this.capacity == null) {
+                this.capacity = capacity;
+            }
+        }
+
+        @Override
+        public synchronized void updateStateChange(UserAction action) {
+            if (action instanceof PostCreationAction) {
+                updateUserFeed(action);
+            } else if (action instanceof RemoveConnectionAction) {
+                removeFeedFromUser(action);
+            } else if (action instanceof PostDeletionAction) {
+                removeDeletedPosts(action);
+            }
+        }
+
+        private void updateUserFeed(UserAction action) {
+            User recipient = action.getOwner();
+            Set<String> feed = userFeed.computeIfAbsent(recipient.getUserId(), k -> new LinkedHashSet<>());
+            if (feed.size() == this.capacity) {
+                Iterator<String> it = feed.iterator();
+                it.next();
+                it.remove();
+            }
+            feed.add(action.getPost().getPostId());
+        }
+
+        private void removeDeletedPosts(UserAction action) {
+            Set<String> feed = userFeed.get(action.getOwner().getUserId());
+            if (feed == null) return;
+            feed.removeIf(postId -> pms.getPost(postId) == null);
+        }
+
+        public synchronized void removeFeedFromUser(UserAction action) {
+            User userA = action.getOwner();
+            User userB = action.getActor();
+            Set<String> userAFeed = userFeed.get(userA.getUserId());
+            Set<String> userBFeed = userFeed.get(userB.getUserId());
+
+            if (userAFeed != null) remove(userAFeed, userB.getUserId());
+            if (userBFeed != null) remove(userBFeed, userA.getUserId());
+        }
+
+        private void remove(Set<String> feed, String targetUserId) {
+            feed.removeIf(postId -> {
+                User creator = pms.getCreator(postId);
+                return creator != null && creator.getUserId().equals(targetUserId);
+            });
+        }
+
+        public List<Post> getUserFeed(String userId) {
+            Set<String> postIds = userFeed.get(userId);
+            if (postIds == null) return null;
+            List<Post> posts = postIds.stream().map(pms::getPost).collect(Collectors.toList());
+            Collections.reverse(posts);
+            return posts;
+        }
+    }
+
+    static class SearchService {
+        private static volatile SearchService instance = null;
+        private static Object lock = new Object();
+        private final TrieNode root;
+        private final Map<String, String> userIdToName;
+        private final UserManagementService ums;
+
+        private SearchService() {
+            this.root = new TrieNode();
+            this.userIdToName = new ConcurrentHashMap<>();
+            this.ums = UserManagementService.getInstance();
+        }
+
+        public static SearchService getInstance() {
+            if (instance == null) {
+                synchronized (lock) {
+                    if (instance == null) {
+                        instance = new SearchService();
+                    }
+                }
+            }
+            return instance;
+        }
+
+        public synchronized void indexUser(String userId, String name) {
+            userIdToName.put(userId, name);
+            for (String token : tokenize(name)) {
+                insertToken(token, userId);
+            }
+        }
+
+        public synchronized void removeUser(String userId) {
+            String name = userIdToName.remove(userId);
+            if (name == null) return;
+            for (String token : tokenize(name)) {
+                removeToken(token, userId);
+            }
+        }
+
+        public synchronized List<User> search(String prefix, int limit) {
+            if (prefix == null || prefix.isEmpty()) return Collections.emptyList();
+            TrieNode node = root;
+            for (char c : prefix.toLowerCase().toCharArray()) {
+                node = node.children.get(c);
+                if (node == null) return Collections.emptyList();
+            }
+            return node.userIds.stream()
+                    .limit(limit)
+                    .map(ums::getUser)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+        }
+
+        private void insertToken(String token, String userId) {
+            TrieNode node = root;
+            for (char c : token.toCharArray()) {
+                node = node.children.computeIfAbsent(c, k -> new TrieNode());
+                node.userIds.add(userId);
+            }
+        }
+
+        private void removeToken(String token, String userId) {
+            TrieNode node = root;
+            for (char c : token.toCharArray()) {
+                node = node.children.get(c);
+                if (node == null) return;
+                node.userIds.remove(userId);
+            }
+        }
+
+        private List<String> tokenize(String name) {
+            List<String> tokens = new ArrayList<>();
+            for (String part : name.toLowerCase().trim().split("\\s+")) {
+                if (!part.isEmpty()) tokens.add(part);
+            }
+            return tokens;
+        }
+
+        private static class TrieNode {
+            Map<Character, TrieNode> children = new HashMap<>();
+            Set<String> userIds = new HashSet<>();
+        }
     }
 
     static class LinkedInFacade {
@@ -614,17 +809,26 @@ public class LinkedIn {
         private final ConnectionManagementService connectionService;
         private final PostManagementService postService;
         private final CommentManagementService commentService;
-        private final NotificationService notificationService;
+        private final NotificationManagementService notificationService;
+        private final FeedManagementService feedService;
+        private final SearchService searchService;
+
 
         public LinkedInFacade() {
             this.userService = UserManagementService.getInstance();
             this.connectionService = ConnectionManagementService.getInstance();
             this.postService = PostManagementService.getInstance();
             this.commentService = CommentManagementService.getInstance();
-            this.notificationService = NotificationService.getInstance();
+            this.notificationService = NotificationManagementService.getInstance();
+            this.feedService = FeedManagementService.getInstance();
+            this.searchService = SearchService.getInstance();
+
+            feedService.setCapacity(1000);
 
             connectionService.addObserver(notificationService);
+            connectionService.addObserver(feedService);
             postService.addObserver(notificationService);
+            postService.addObserver(feedService);
             commentService.addObserver(notificationService);
         }
 
@@ -649,12 +853,15 @@ public class LinkedIn {
 
         // ---------- User ----------
         public User registerUser(String userId, String userName, String phoneNumber, String emailId) {
-            return userService.registerUser(userId, userName, phoneNumber, emailId);
+            User u = userService.registerUser(userId, userName, phoneNumber, emailId);
+            searchService.indexUser(userId, userName);
+            return u;
         }
 
         public void deleteUser(String userId) {
             requireUser(userId);
             userService.deleteUser(userId);
+            searchService.removeUser(userId);
         }
 
         public void addWorkExperience(String userId, Map<Integer, User.WorkExperience> workExp) {
@@ -715,7 +922,7 @@ public class LinkedIn {
             Post post = requirePost(postId);
             if (!post.getUser().getUserId().equals(userId))
                 throw new IllegalStateException("User " + userId + " does not own post " + postId);
-            postService.removePost(user, postId);
+            postService.deletePost(user, postId);
         }
 
         public void likePost(String postId, String actorId) {
@@ -759,6 +966,18 @@ public class LinkedIn {
         public List<UserAction> getNotifications(String userId) {
             requireUser(userId);
             return notificationService.getNotifications(userId);
+        }
+
+        // ---------- Feed ----------
+        public List<Post> getUserFeed(String userId) {
+            requireUser(userId);
+            List<Post> feed = feedService.getUserFeed(userId);
+            return feed == null ? Collections.emptyList() : feed;
+        }
+
+        // New search method:
+        public List<User> searchUsers(String prefix, int limit) {
+            return searchService.search(prefix, limit);
         }
     }
 
