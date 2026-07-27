@@ -1,4 +1,4 @@
-package Problems.SocialAndContentPlatforms;
+package Problems.SocialAndContentPlatforms.LinkedIn;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
