@@ -1,0 +1,222 @@
+package Problems.CommunicationANDMessagingSystem;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.*;
+
+/*
+FRs:
+1. notifications supported by system - EMAIL, SMS, PUSH
+2. Sends notifications asynchronously
+3. Send one notification at a time.
+4. The system should send notifications asynchronously.
+5. Delivery should be non-blocking, using a thread pool to manage parallel sending.
+
+NFRs:
+1. Modular: classes should be well separated.
+2. Extensible: class should be extensible for future features.
+3. OOD: system should follow OOD principles
+
+
+ */
+public class NotificationSystem {
+    enum MessageType {
+        PUSH,
+        EMAIL,
+        SMS;
+    }
+
+    static interface Service {
+        public MessageType getType();
+        public Response publish(Recipient recipient, String content);
+    }
+
+    static class Recipient {
+        private final String recipientId;
+        private final String email;
+        private final String mobNo;
+
+        public Recipient(String recipientId, String email, String mobNo) {
+            this.recipientId = recipientId;
+            this.email = email;
+            this.mobNo = mobNo;
+        }
+
+        public String getRecipientId() {
+            return recipientId;
+        }
+
+        public String getEmail() {
+            return email;
+        }
+
+        public String getMobNo() {
+            return mobNo;
+        }
+    }
+
+    static class Response {
+        private final MessageType channel;
+        private final int code;
+        private final boolean success;
+        private final String detail;
+
+        public Response(MessageType channel, int code, boolean success, String detail) {
+            this.channel = channel;
+            this.code = code;
+            this.success = success;
+            this.detail = detail;
+        }
+
+        public MessageType getChannel() {
+            return channel;
+        }
+
+        public int getCode() {
+            return code;
+        }
+
+        public boolean isSuccess() {
+            return success;
+        }
+
+        public String getDetail() {
+            return detail;
+        }
+    }
+
+    static class EmailService implements Service {
+        @Override
+        public MessageType getType() {
+            return MessageType.EMAIL;
+        }
+
+        @Override
+        public Response publish(Recipient recipient, String content) {
+            return new Response(getType(), 200, true, "message sent");
+        }
+    }
+
+    static class PushService implements Service {
+        @Override
+        public MessageType getType() {
+            return MessageType.PUSH;
+        }
+
+        @Override
+        public Response publish(Recipient recipient, String content) {
+            return new Response(getType(), 200, true, "message sent");
+        }
+    }
+
+    static class SMSService implements Service {
+        @Override
+        public MessageType getType() {
+            return MessageType.SMS;
+        }
+
+        @Override
+        public Response publish(Recipient recipient, String content) {
+            return new Response(getType(), 200, true, "message sent");
+        }
+    }
+
+    static class RecipientService {
+        private final Map<String, Recipient> recipients;
+
+        public RecipientService() {
+            this.recipients = new ConcurrentHashMap<>();
+        }
+
+        public Recipient createUser(String recipientId, String email, String mobNo) {
+            return recipients.computeIfAbsent(recipientId, id -> new Recipient(id, email, mobNo));
+        }
+
+        public Recipient getRecipient(String recipientId) {
+            return recipients.get(recipientId);
+        }
+    }
+
+    static class NotificationService {
+        private final Map<MessageType, Service> services;
+        private ExecutorService executor;
+        private RecipientService recipientService;
+
+        public NotificationService(RecipientService recipientService) {
+            this.services = new ConcurrentHashMap<>();
+            this.recipientService = recipientService;
+            this.executor = Executors.newFixedThreadPool(10, (runnable) -> {
+                Thread th = new Thread(runnable, "Worker Thread");
+                th.setDaemon(true);
+                return th;
+            });
+        }
+
+        public void registerChannel(String messageType, Service service) {
+            services.putIfAbsent(MessageType.valueOf(messageType), service);
+        }
+
+        public CompletableFuture<List<Response>> publish(List<MessageType> messageTypes, String content, String recipientId) {
+            List<CompletableFuture<Response>> futures = messageTypes.stream()
+                    .map(messageType -> CompletableFuture.supplyAsync(() -> {
+                        Service svc = services.get(messageType);
+                        if (svc == null) return new Response(messageType, 500, false, "message sent failure");
+                        return svc.publish(recipientService.getRecipient(recipientId), content);
+                    }, executor).exceptionally(ex -> new Response(messageType, 500, false, ex.getMessage())))
+                    .toList();
+            return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).
+                    thenApply(v -> futures.stream().map(CompletableFuture::join).toList());
+        }
+
+        public void shutdown() {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                    executor.awaitTermination(2, TimeUnit.SECONDS);
+                }
+            } catch (InterruptedException e) {
+                executor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    static class NotificationSystemFacade {
+        private static final Object lock = new Object();
+        private static volatile NotificationSystemFacade instance = null;
+        private NotificationService notificationService;
+        private RecipientService recipientService;
+
+        public NotificationSystemFacade() {
+            this.recipientService = new RecipientService();
+            this.notificationService = new NotificationService(this.recipientService);
+        }
+
+        public static NotificationSystemFacade getInstance() {
+            if (instance == null) {
+                synchronized (lock) {
+                    if (instance == null) {
+                        instance = new NotificationSystemFacade();
+                    }
+                }
+            }
+            return instance;
+        }
+
+        public Recipient registerRecipient(String recipientId, String mobNo, String email) {
+            return recipientService.createUser(recipientId, email, mobNo);
+        }
+
+        public CompletableFuture<List<Response>> publish(String recipientId, String content, List<MessageType> messageTypes) {
+            if (recipientService.getRecipient(recipientId) == null)
+                return CompletableFuture.failedFuture(new IllegalArgumentException("Unknown recipient"));
+            return this.notificationService.publish(messageTypes, content, recipientId);
+        }
+
+        public void registerChannel(String messageType, Service service) {
+            this.notificationService.registerChannel(messageType, service);
+        }
+    }
+}
