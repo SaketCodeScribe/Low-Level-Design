@@ -980,5 +980,4 @@ public class LinkedIn {
             return searchService.search(prefix, limit);
         }
     }
-
 }
