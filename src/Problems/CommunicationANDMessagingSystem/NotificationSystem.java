@@ -1,6 +1,5 @@
 package Problems.CommunicationANDMessagingSystem;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
@@ -29,7 +28,8 @@ public class NotificationSystem {
 
     static interface Service {
         public MessageType getType();
-        public Response publish(Recipient recipient, String content);
+
+        public Response publish(Recipient recipient, String content) throws DeliveryException;
     }
 
     static class Recipient {
@@ -122,6 +122,52 @@ public class NotificationSystem {
         }
     }
 
+    static class RetryService implements Service {
+        private final Service service;
+        private final int max_retry = 3;
+        private final int retryDelayMillis = 1000;
+
+        public RetryService(Service service) {
+            this.service = service;
+        }
+
+        @Override
+        public MessageType getType() {
+            return null;
+        }
+
+        @Override
+        public Response publish(Recipient recipient, String content) throws DeliveryException {
+            int attempt = 0;
+
+            while (attempt <= this.max_retry) {
+                try {
+                    return this.service.publish(recipient, content);
+                } catch (Exception e) {
+                    attempt++;
+                    System.out.println("Error: Attempt " + attempt + " failed for notification " + recipient.getRecipientId() + ". Retrying...");
+                    if (attempt >= max_retry) {
+                        System.out.println(e.getMessage());
+                        throw new DeliveryException("Failed to send notification after " + max_retry + " attempts.", e);
+                    }
+                    try {
+                        Thread.sleep(retryDelayMillis);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new DeliveryException("Interrupted during retry backoff.", ie);
+                    }
+                }
+            }
+        }
+
+    }
+
+    static class DeliveryException extends Exception {
+        public DeliveryException(String msg, Exception e) {
+            super(msg, e);
+        }
+    }
+
     static class RecipientService {
         private final Map<String, Recipient> recipients;
 
@@ -138,13 +184,32 @@ public class NotificationSystem {
         }
     }
 
+    static class ServiceFactory {
+        private static final Map<MessageType, Service> serviceMap = new ConcurrentHashMap<>();
+
+        public static Service createService(MessageType type) {
+            return serviceMap.computeIfAbsent(type, ServiceFactory::buildService);
+        }
+
+        private static Service buildService(MessageType type) {
+            switch (type) {
+                case EMAIL:
+                    return new EmailService();
+                case SMS:
+                    return new SMSService();
+                case PUSH:
+                    return new PushService();
+                default:
+                    throw new IllegalArgumentException("Unsupported notification type: " + type);
+            }
+        }
+    }
+
     static class NotificationService {
-        private final Map<MessageType, Service> services;
         private ExecutorService executor;
         private RecipientService recipientService;
 
         public NotificationService(RecipientService recipientService) {
-            this.services = new ConcurrentHashMap<>();
             this.recipientService = recipientService;
             this.executor = Executors.newFixedThreadPool(10, (runnable) -> {
                 Thread th = new Thread(runnable, "Worker Thread");
@@ -153,16 +218,17 @@ public class NotificationSystem {
             });
         }
 
-        public void registerChannel(String messageType, Service service) {
-            services.putIfAbsent(MessageType.valueOf(messageType), service);
-        }
 
         public CompletableFuture<List<Response>> publish(List<MessageType> messageTypes, String content, String recipientId) {
             List<CompletableFuture<Response>> futures = messageTypes.stream()
                     .map(messageType -> CompletableFuture.supplyAsync(() -> {
-                        Service svc = services.get(messageType);
-                        if (svc == null) return new Response(messageType, 500, false, "message sent failure");
-                        return svc.publish(recipientService.getRecipient(recipientId), content);
+                        Service svc = new RetryService(ServiceFactory.createService(messageType));
+
+                        try {
+                            return svc.publish(recipientService.getRecipient(recipientId), content);
+                        } catch (DeliveryException e) {
+                            throw new RuntimeException(e);
+                        }
                     }, executor).exceptionally(ex -> new Response(messageType, 500, false, ex.getMessage())))
                     .toList();
             return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).
@@ -213,10 +279,6 @@ public class NotificationSystem {
             if (recipientService.getRecipient(recipientId) == null)
                 return CompletableFuture.failedFuture(new IllegalArgumentException("Unknown recipient"));
             return this.notificationService.publish(messageTypes, content, recipientId);
-        }
-
-        public void registerChannel(String messageType, Service service) {
-            this.notificationService.registerChannel(messageType, service);
         }
     }
 }
