@@ -140,7 +140,7 @@ public class NotificationSystem {
         public Response publish(Recipient recipient, String content) throws DeliveryException {
             int attempt = 0;
 
-            while (attempt <= this.max_retry) {
+            while (attempt <= this.max_retry && !Thread.currentThread().isInterrupted()) {
                 try {
                     return this.service.publish(recipient, content);
                 } catch (Exception e) {
@@ -158,6 +158,7 @@ public class NotificationSystem {
                     }
                 }
             }
+            return null;
         }
 
     }
