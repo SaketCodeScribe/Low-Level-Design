@@ -132,8 +132,9 @@ public class ChatApplication {
         }
 
         public synchronized void sendMessage(String conversationId, Message message) {
-            if (cms.getConversation(conversationId) == null || !cms.getConversation(conversationId).getUsers().contains(message.owner()))
-                return;
+            if (cms.getConversation(conversationId) == null) return;
+            if (message.type() == MessageType.USER &&
+                    !cms.getConversation(conversationId).getUsers().contains(message.owner())) return;
             recordService.appendRecord(conversationId, message);
             notifyAll(conversationId, message, cms.getUsers(conversationId));
         }
@@ -241,16 +242,20 @@ public class ChatApplication {
             Conversation convo = conversations.get(convoId);
             if (convo instanceof MutableConversation mutable) {
                 for (User user : users) {
-                    mutable.removeUsers(user);
-                    userGroups.get(user.userId()).remove(convoId);
-                    recordService.removeRecord(user.userId(), convoId);
+                    if (userGroups.containsKey(user.userId())) {
+                        mutable.removeUsers(user);
+                        userGroups.get(user.userId()).remove(convoId);
+                        recordService.removeRecord(user.userId(), convoId);
+                    }
                 }
                 chatService.sendMessage(convoId, new Message(UUID.randomUUID().node(), null, String.format("%s has removed %s from group %s", removedBy.userId(), users, convoId), System.currentTimeMillis(), MessageType.SYSTEM));
             }
         }
 
         public synchronized void leaveGroup(String convoId, User user) {
-            if (userGroups.containsKey(user.userId()) && userGroups.get(user.userId()).contains(convoId)) {
+            if (conversations.containsKey(convoId) &&
+                    userGroups.containsKey(user.userId()) &&
+                    userGroups.get(user.userId()).contains(convoId)) {
                 Conversation convo = conversations.get(convoId);
                 if (convo instanceof MutableConversation mutable) {
                     mutable.removeUsers(user);
@@ -258,8 +263,8 @@ public class ChatApplication {
                     recordService.removeRecord(user.userId(), convoId);
                     chatService.sendMessage(convoId, new Message(UUID.randomUUID().node(), null, String.format("%s has left the group %s", user.userId(), convoId), System.currentTimeMillis(), MessageType.SYSTEM));
                 }
+                if (conversations.get(convoId).getUsers().isEmpty()) conversations.remove(convoId);
             }
-            if (conversations.get(convoId).getUsers().isEmpty()) conversations.remove(convoId);
         }
     }
 
