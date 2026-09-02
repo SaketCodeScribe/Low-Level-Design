@@ -137,7 +137,7 @@ public class PaymentGateway {
             if (isNew[0]) {
                 orders.put(orderId, Map.entry(user, merchant));
                 CompletableFuture<Response> actual = submitAndNotify(
-                        new RetryPayment(new CardPayment(cardDetails), 3), amt, orderId);
+                        new RetryPayment(new CardPayment(cardDetails), MAX_ATTEMPT), amt, orderId);
                 actual.whenComplete((resp, ex) -> {
                     if (ex != null) future.completeExceptionally(ex);
                     else future.complete(resp);
@@ -158,7 +158,7 @@ public class PaymentGateway {
             if (isNew[0]) {
                 orders.put(orderId, Map.entry(user, merchant));
                 CompletableFuture<Response> actual = submitAndNotify(
-                        new RetryPayment(new UpiPayment(upiId), 3), amt, orderId);
+                        new RetryPayment(new UpiPayment(upiId), MAX_ATTEMPT), amt, orderId);
                 actual.whenComplete((resp, ex) -> {
                     if (ex != null) future.completeExceptionally(ex);
                     else future.complete(resp);
