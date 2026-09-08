@@ -279,7 +279,7 @@ public class StockBrokerage {
         Map<String, Order<Buy>> buyOrders;
         Map<String, Order<Sell>> sellOrders;
         Map<String, User> orderToUser;
-        Map<Company, Map.Entry<Lock, Condition>> companyTokens;
+        Map<Company, Lock> companyLocks;
         ReentrantReadWriteLock lock;
         ExecutorService executors;
         Set<Observer> observers;
@@ -294,7 +294,7 @@ public class StockBrokerage {
             this.lock = new ReentrantReadWriteLock();
             this.orderToUser = new ConcurrentHashMap<>();
             this.observers = ConcurrentHashMap.newKeySet();
-            this.companyTokens = new HashMap<>();
+            this.companyLocks = new ConcurrentHashMap<>();
             AtomicReference<Integer> thCnt = new AtomicReference<>(0);
             this.executors = Executors.newFixedThreadPool(10, (runnable) -> {
                 Thread th = new Thread(runnable, "Order daemon Thread - " + thCnt.getAndSet(thCnt.get() + 1));
@@ -313,11 +313,6 @@ public class StockBrokerage {
         public Order<Buy> createBuyOrder(User user, Company company, String orderId, OrderType orderType, double noOfShares, double amt) {
             Order<Buy> buyOrder;
 
-            companyTokens.computeIfAbsent(company, key -> {
-                Lock lock = new ReentrantLock();
-                Condition condition = lock.newCondition();
-                return Map.entry(lock, condition);
-            });
             buys.putIfAbsent(company, new PriorityQueue<>());
             switch (orderType) {
                 case MarketOrder ->
@@ -351,11 +346,6 @@ public class StockBrokerage {
             Order<Sell> sellOrder;
 
             sells.putIfAbsent(company, new PriorityQueue<>());
-            companyTokens.computeIfAbsent(company, key -> {
-                Lock lock = new ReentrantLock();
-                Condition condition = lock.newCondition();
-                return Map.entry(lock, condition);
-            });
             switch (orderType) {
                 case MarketOrder ->
                         sellOrder = new Sell(orderId, noOfShares, ms.getCompanySharePrice(company), OrderType.MarketOrder);
@@ -389,11 +379,32 @@ public class StockBrokerage {
             });
         }
 
-        public void execute() {
+        private void triggerMatching(Company company) {
+            executors.submit(() -> {
+                Lock lock = companyLocks.computeIfAbsent(company, k -> new ReentrantLock());
+                lock.lock();
+                try {
+                    matchOrders(company);
+                } finally {
+                    lock.unlock();
+                    matchingInProgress.remove(company);
+                    if (hasMatchableOrders(company)) {
+                        triggerMatching(company);
+                    }
+                }
+            });
+        }
+        private boolean hasMatchableOrders(Company company) {
+            Queue<Order<Buy>> buyQ = buys.get(company);
+            Queue<Order<Sell>> sellQ = sells.get(company);
+            if (buyQ == null || sellQ == null || buyQ.isEmpty() || sellQ.isEmpty()) return false;
 
+            return buyQ.peek().getAmount() >= sellQ.peek().getAmount();
+        }
+        private void matchOrders(Company company) {
         }
 
-        static class Response {
+            static class Response {
             final OrderStatus status;
             final int code;
             final String mssg;
