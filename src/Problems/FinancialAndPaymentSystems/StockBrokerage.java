@@ -1,39 +1,25 @@
 package Problems.FinancialAndPaymentSystems;
 
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.Condition;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
-/**
- * Functional Requirements:
- * Users can buy/sell orders at market or limit order
- * Users can track his history
- * Notify users when order transaction is complete(buy/sell achieved)
- * User portfolio - total amt invested, current value, remaining amount
- * <p>
- * Non-functional requirements:
- * classes should be modular and follow OOD principle for easier testing of components
- * classes should be extensible to accommodate new features
- * system should be scalable to handle growing no of users
- * system should handle concurrent requests
- */
 public class StockBrokerage {
     enum OrderType {
         MarketOrder,
-        LimitOrder;
+        LimitOrder
     }
 
     enum OrderStatus {
         Initiated,
         Completed,
-        Failed;
+        Failed,
+        Partial_Complete
     }
 
     interface Order<T> extends Comparable<T> {
@@ -41,23 +27,34 @@ public class StockBrokerage {
 
         double getNoOfShares();
 
+        void reduceShares(double shares);
+
+        OrderStatus getStatus();
+
         void setStatus(OrderStatus status);
 
         double getAmount();
     }
 
+    interface Observable {
+        void notifyClient(Order order, User user);
+    }
+
     interface Observer {
-        void notifyClient(String orderId, User user, String mssg);
+        void updateStateChange(Order order, User user);
     }
 
     record User(String userId, String userName) {
     }
 
+    record Company(String companyName) {
+    }
+
     static class Buy implements Order<Buy> {
         final String orderId;
-        final double noOfShares;
         final double amount;
         final OrderType orderType;
+        double noOfShares;
         OrderStatus status;
 
         public Buy(String orderId, double noOfShares, double amount, OrderType orderType) {
@@ -74,10 +71,21 @@ public class StockBrokerage {
         }
 
         @Override
-        public String getOrderId() {
-            return this.orderId;
+        public void reduceShares(double shares) {
+            this.noOfShares -= shares;
         }
 
+        @Override
+        public String getOrderId() {
+            return orderId;
+        }
+
+        @Override
+        public OrderStatus getStatus() {
+            return status;
+        }
+
+        @Override
         public void setStatus(OrderStatus status) {
             this.status = status;
         }
@@ -95,9 +103,9 @@ public class StockBrokerage {
 
     static class Sell implements Order<Sell> {
         final String orderId;
-        final double noOfShares;
         final double amount;
         final OrderType orderType;
+        double noOfShares;
         OrderStatus status;
 
         public Sell(String orderId, double noOfShares, double amount, OrderType orderType) {
@@ -108,23 +116,29 @@ public class StockBrokerage {
             this.status = OrderStatus.Initiated;
         }
 
-        public void setStatus(OrderStatus status) {
-            this.status = status;
-        }
-
         @Override
         public double getNoOfShares() {
             return noOfShares;
         }
 
         @Override
-        public String getOrderId() {
-            return this.orderId;
+        public void reduceShares(double shares) {
+            this.noOfShares -= shares;
         }
 
         @Override
-        public int compareTo(Sell o) {
-            return Double.compare(this.amount, o.amount);
+        public String getOrderId() {
+            return orderId;
+        }
+
+        @Override
+        public OrderStatus getStatus() {
+            return status;
+        }
+
+        @Override
+        public void setStatus(OrderStatus status) {
+            this.status = status;
         }
 
         @Override
@@ -132,6 +146,10 @@ public class StockBrokerage {
             return amount;
         }
 
+        @Override
+        public int compareTo(Sell o) {
+            return Double.compare(this.amount, o.amount);
+        }
     }
 
     static class Portfolio {
@@ -153,16 +171,12 @@ public class StockBrokerage {
             this.balance = portfolio.balance;
             this.invested = portfolio.invested;
             this.value = portfolio.value;
-            this.shares = portfolio.shares;
-            this.history = portfolio.history;
+            this.shares = new HashMap<>(portfolio.shares);
+            this.history = new LinkedHashMap<>(portfolio.history);
         }
 
         public void updateBalance(double money) {
-            this.balance += balance;
-        }
-
-        public void updateInvested(double money) {
-            this.invested += invested;
+            this.balance += money;
         }
 
         public void updateValue(double value) {
@@ -170,7 +184,8 @@ public class StockBrokerage {
         }
 
         public void addShare(Company company, double share) {
-            shares.put(company, shares.getOrDefault(company, 0d) + share);
+            shares.merge(company, share, Double::sum);
+            if (shares.get(company) == 0d) shares.remove(company);
         }
 
         public List<Order> getOrders() {
@@ -178,12 +193,8 @@ public class StockBrokerage {
         }
 
         public void appendOrder(Order order) {
-            this.history.putIfAbsent(order, );
+            this.history.putIfAbsent(order.getOrderId(), order);
         }
-
-    }
-
-    record Company(String companyName) {
     }
 
     static class MarketService {
@@ -192,11 +203,15 @@ public class StockBrokerage {
 
         public MarketService() {
             this.sharePrices = new ConcurrentHashMap<>();
-            this.companyPerformances = new HashMap<>();
+            this.companyPerformances = new ConcurrentHashMap<>();
+        }
+
+        public void registerCompany(Company company, double initialPrice) {
+            sharePrices.putIfAbsent(company.companyName(), initialPrice);
         }
 
         public void updateSharePrice(Company company, double sharePrice) {
-            this.sharePrices.computeIfPresent(company.companyName(), (key, value) -> {
+            sharePrices.compute(company.companyName(), (key, value) -> {
                 updateCompanyPerformance(company, sharePrice);
                 return sharePrice;
             });
@@ -216,7 +231,7 @@ public class StockBrokerage {
     }
 
     static class PortfolioService {
-        Map<User, AtomicReference<Portfolio>> portfolios;
+        Map<User, Portfolio> portfolios;
         MarketService ms;
 
         public PortfolioService(MarketService ms) {
@@ -224,63 +239,58 @@ public class StockBrokerage {
             portfolios = new ConcurrentHashMap<>();
         }
 
-        public void updateBalance(User user, double money) {
-            portfolios.computeIfPresent(user, (key, value) -> {
-                Portfolio old = value.get();
-                Portfolio newP = new Portfolio(old);
-                newP.updateBalance(money);
-                while (!value.compareAndSet(old, newP)) {
-                    old = value.get();
-                    newP.balance = old.balance;
-                    newP.updateBalance(money);
-                }
-                return value;
-            });
+        public void registerUser(User user, double initialBalance) {
+            portfolios.putIfAbsent(user, new Portfolio(initialBalance, 0, 0));
         }
 
-        public void updateInvestment(User user, double investment) {
+        public void updateBalance(User user, double money) {
             portfolios.computeIfPresent(user, (key, value) -> {
-                Portfolio old = value.get();
-                Portfolio newP = new Portfolio(old);
-                newP.updateInvested(investment);
-                while (!value.compareAndSet(old, newP)) {
-                    old = value.get();
-                    newP.invested = old.invested;
-                    newP.updateInvested(investment);
-                }
+                value.updateBalance(money);
                 return value;
             });
         }
 
         public void addOrder(User user, Order order) {
             portfolios.computeIfPresent(user, (key, value) -> {
-                Portfolio old = value.get();
-                Portfolio newP = new Portfolio(old);
-                newP.appendOrder(order);
-                while (!value.compareAndSet(old, newP)) {
-                    old = value.get();
-                    newP.history = old.history;
-                    newP.appendOrder(order);
-                }
+                value.appendOrder(order);
                 return value;
             });
         }
 
         public Portfolio getPortfolio(User user) {
-            return portfolios.get(user).get();
+            return portfolios.get(user);
+        }
+
+        public void addShare(User user, Company company, double shares) {
+            portfolios.computeIfPresent(user, (key, value) -> {
+                value.addShare(company, shares);
+                return value;
+            });
+        }
+
+        public double getUserInvestment(User user) {
+            double[] amount = new double[1];
+            portfolios.computeIfPresent(user, (key, value) -> {
+                for (Map.Entry<Company, Double> entry : value.shares.entrySet()) {
+                    amount[0] += ms.getCompanySharePrice(entry.getKey()) * entry.getValue();
+                }
+                return value;
+            });
+            return amount[0];
         }
     }
 
-    static class OrderService {
+    static class OrderService implements Observable {
         MarketService ms;
         PortfolioService ps;
         Map<Company, PriorityQueue<Order<Buy>>> buys;
         Map<Company, PriorityQueue<Order<Sell>>> sells;
         Map<String, Order<Buy>> buyOrders;
         Map<String, Order<Sell>> sellOrders;
+        Map<Company, ConcurrentLinkedQueue<Order<Buy>>> buyStaging = new ConcurrentHashMap<>();
+        Map<Company, ConcurrentLinkedQueue<Order<Sell>>> sellStaging = new ConcurrentHashMap<>();
         Map<String, User> orderToUser;
         Map<Company, Lock> companyLocks;
-        ReentrantReadWriteLock lock;
         ExecutorService executors;
         Set<Observer> observers;
 
@@ -291,132 +301,168 @@ public class StockBrokerage {
             this.sells = new ConcurrentHashMap<>();
             this.buyOrders = new ConcurrentHashMap<>();
             this.sellOrders = new ConcurrentHashMap<>();
-            this.lock = new ReentrantReadWriteLock();
             this.orderToUser = new ConcurrentHashMap<>();
             this.observers = ConcurrentHashMap.newKeySet();
             this.companyLocks = new ConcurrentHashMap<>();
-            AtomicReference<Integer> thCnt = new AtomicReference<>(0);
+            AtomicInteger thCnt = new AtomicInteger(0);
             this.executors = Executors.newFixedThreadPool(10, (runnable) -> {
-                Thread th = new Thread(runnable, "Order daemon Thread - " + thCnt.getAndSet(thCnt.get() + 1));
+                Thread th = new Thread(runnable, "Order daemon Thread - " + thCnt.getAndIncrement());
                 th.setDaemon(true);
                 return th;
             });
         }
 
-
-        public void cancelOrder(String orderId) {
-            this.lock.writeLock().lock();
-            orders.get(orderId).setStatus(OrderStatus.Cancelled);
-            this.lock.writeLock().unlock();
+        private Lock getCompanyLock(Company company) {
+            return companyLocks.computeIfAbsent(company, k -> new ReentrantLock());
         }
 
-        public Order<Buy> createBuyOrder(User user, Company company, String orderId, OrderType orderType, double noOfShares, double amt) {
+        public Order<Buy> createBuyOrder(User user, Company company, String orderId,
+                                         OrderType orderType, double noOfShares, double amt) {
             Order<Buy> buyOrder;
-
-            buys.putIfAbsent(company, new PriorityQueue<>());
             switch (orderType) {
                 case MarketOrder ->
                         buyOrder = new Buy(orderId, noOfShares, ms.getCompanySharePrice(company), OrderType.MarketOrder);
                 case LimitOrder -> buyOrder = new Buy(orderId, noOfShares, amt, OrderType.LimitOrder);
                 default -> throw new IllegalArgumentException(orderType + " not supported");
             }
-            buys.compute(company, (k, v) -> {
-                if (v == null) v = new PriorityQueue<>();
-                v.add(buyOrder);
-                return v;
-            });
+
+            buyStaging.computeIfAbsent(company, k -> new ConcurrentLinkedQueue<>()).add(buyOrder);
+
             buyOrders.putIfAbsent(orderId, buyOrder);
             orderToUser.putIfAbsent(orderId, user);
-            companyTokens.computeIfPresent(company, (k, v) -> {
-                v.getValue().signalAll();
-                return v;
-            });
-
+            ps.addOrder(user, buyOrder);
+            triggerMatching(company);
             return buyOrder;
         }
 
-        private void updateBuyOrderStatus(String orderId, OrderStatus orderStatus) {
-            buyOrders.computeIfPresent(orderId, (k, v) -> {
-                v.setStatus(orderStatus);
-                return v;
-            });
-        }
-
-        public Order<Sell> createSellOrder(User user, Company company, String orderId, OrderType orderType, double noOfShares, double amt) {
+        public Order<Sell> createSellOrder(User user, Company company, String orderId,
+                                           OrderType orderType, double noOfShares, double amt) {
             Order<Sell> sellOrder;
-
-            sells.putIfAbsent(company, new PriorityQueue<>());
             switch (orderType) {
                 case MarketOrder ->
                         sellOrder = new Sell(orderId, noOfShares, ms.getCompanySharePrice(company), OrderType.MarketOrder);
                 case LimitOrder -> sellOrder = new Sell(orderId, noOfShares, amt, OrderType.LimitOrder);
                 default -> throw new IllegalArgumentException(orderType + " not supported");
             }
-            sells.compute(company, (k, v) -> {
-                if (v == null) v = new PriorityQueue<>();
-                v.add(sellOrder);
-                return v;
-            });
+            sellStaging.computeIfAbsent(company, k -> new ConcurrentLinkedQueue<>()).add(sellOrder);
+
             sellOrders.putIfAbsent(orderId, sellOrder);
             orderToUser.putIfAbsent(orderId, user);
-            companyTokens.computeIfPresent(company, (k, v) -> {
-                v.getValue().signalAll();
-                return v;
-            });
+            ps.addOrder(user, sellOrder);
+            triggerMatching(company);
             return sellOrder;
         }
 
-        private void notifyClient(String orderId, User user, String mssg) {
+        @Override
+        public void notifyClient(Order order, User user) {
             for (Observer ob : observers) {
-                ob.updateState(orderId, user, mssg);
+                ob.updateStateChange(order, user);
             }
         }
 
-        private void updateSellOrderStatus(String orderId, OrderStatus orderStatus) {
-            sellOrders.computeIfPresent(orderId, (k, v) -> {
-                v.setStatus(orderStatus);
-                return v;
-            });
-        }
-
         private void triggerMatching(Company company) {
-            executors.submit(() -> {
-                Lock lock = companyLocks.computeIfAbsent(company, k -> new ReentrantLock());
-                lock.lock();
-                try {
-                    matchOrders(company);
-                } finally {
-                    lock.unlock();
-                    matchingInProgress.remove(company);
-                    if (hasMatchableOrders(company)) {
-                        triggerMatching(company);
+            this.executors.submit(() -> {
+                drainStaging(company);
+                Lock lock = getCompanyLock(company);
+                if (lock.tryLock()) {
+                    try {
+                        matchOrder(company);
+                    } finally {
+                        lock.unlock();
+                        if (hasMatchableOrders(company)) {
+                            triggerMatching(company);
+                        }
                     }
                 }
             });
         }
-        private boolean hasMatchableOrders(Company company) {
-            Queue<Order<Buy>> buyQ = buys.get(company);
-            Queue<Order<Sell>> sellQ = sells.get(company);
-            if (buyQ == null || sellQ == null || buyQ.isEmpty() || sellQ.isEmpty()) return false;
 
-            return buyQ.peek().getAmount() >= sellQ.peek().getAmount();
-        }
-        private void matchOrders(Company company) {
-        }
+        private void drainStaging(Company company) {
+            ConcurrentLinkedQueue<Order<Buy>> buyQ = buyStaging.get(company);
+            if (buyQ != null) {
+                Order<Buy> o;
+                while ((o = buyQ.poll()) != null) {
+                    buys.computeIfAbsent(company, k -> new PriorityQueue<>()).add(o);
+                }
+            }
 
-            static class Response {
-            final OrderStatus status;
-            final int code;
-            final String mssg;
-
-            public Response(OrderStatus status, String mssg, int code) {
-                this.status = status;
-                this.mssg = mssg;
-                this.code = code;
+            ConcurrentLinkedQueue<Order<Sell>> sellQ = sellStaging.get(company);
+            if (sellQ != null) {
+                Order<Sell> o;
+                while ((o = sellQ.poll()) != null) {
+                    sells.computeIfAbsent(company, k -> new PriorityQueue<>()).add(o);
+                }
             }
         }
 
+        private boolean hasMatchableOrders(Company company) {
+            PriorityQueue<Order<Buy>> buyQ = buys.get(company);
+            PriorityQueue<Order<Sell>> sellQ = sells.get(company);
+            if (buyQ == null || buyQ.isEmpty() || sellQ == null || sellQ.isEmpty()) return false;
+            return buyQ.peek().getAmount() >= sellQ.peek().getAmount();
+        }
+
+        private void matchOrder(Company company) {
+            PriorityQueue<Order<Buy>> buyQ = buys.get(company);
+            PriorityQueue<Order<Sell>> sellQ = sells.get(company);
+            if (buyQ == null || sellQ == null) return;
+
+            while (!buyQ.isEmpty() && !sellQ.isEmpty()) {
+                if (buyQ.peek().getAmount() < sellQ.peek().getAmount()) break;
+
+                Order<Buy> buyOrder = buyQ.poll();
+                Order<Sell> sellOrder = sellQ.poll();
+                double matched = Math.min(buyOrder.getNoOfShares(), sellOrder.getNoOfShares());
+                double price = sellOrder.getAmount();
+
+                User buyer = orderToUser.get(buyOrder.getOrderId());
+                User seller = orderToUser.get(sellOrder.getOrderId());
+
+                try {
+                    ps.updateBalance(buyer, -(matched * price));
+                    ps.addShare(buyer, company, matched);
+
+                    ps.updateBalance(seller, matched * price);
+                    ps.addShare(seller, company, -matched);
+
+                    ms.updateSharePrice(company, price);
+
+                    if (Math.abs(matched - buyOrder.getNoOfShares()) < 1e-9) {
+                        buyOrder.setStatus(OrderStatus.Completed);
+                        notifyClient(buyOrder, buyer);
+                    } else {
+                        buyOrder.reduceShares(matched);
+                        buyOrder.setStatus(OrderStatus.Partial_Complete);
+                        buyQ.offer(buyOrder);
+                    }
+
+                    if (Math.abs(matched - sellOrder.getNoOfShares()) < 1e-9) {
+                        sellOrder.setStatus(OrderStatus.Completed);
+                        notifyClient(sellOrder, seller);
+                    } else {
+                        sellOrder.reduceShares(matched);
+                        sellOrder.setStatus(OrderStatus.Partial_Complete);
+                        sellQ.offer(sellOrder);
+                    }
+
+                } catch (Exception e) {
+                    ps.updateBalance(buyer, matched * price);
+                    ps.addShare(buyer, company, -matched);
+                    ps.updateBalance(seller, -(matched * price));
+                    ps.addShare(seller, company, matched);
+
+                    buyOrder.setStatus(OrderStatus.Failed);
+                    sellOrder.setStatus(OrderStatus.Failed);
+                    buyQ.offer(buyOrder);
+                    sellQ.offer(sellOrder);
+                    notifyClient(buyOrder, buyer);
+                    notifyClient(sellOrder, seller);
+                    break;
+                }
+            }
+        }
     }
+
     static class StockBrokerageFacade {
         private static volatile StockBrokerageFacade INSTANCE;
 
@@ -441,7 +487,13 @@ public class StockBrokerage {
             return INSTANCE;
         }
 
-        // ---- User / Portfolio ----
+        public void registerCompany(Company company, double initialPrice) {
+            marketService.registerCompany(company, initialPrice);
+        }
+
+        public void registerUser(User user, double initialBalance) {
+            portfolioService.registerUser(user, initialBalance);
+        }
 
         public Portfolio getPortfolio(User user) {
             return portfolioService.getPortfolio(user);
@@ -451,8 +503,6 @@ public class StockBrokerage {
             return portfolioService.getPortfolio(user).getOrders();
         }
 
-        // ---- Market Data ----
-
         public Double getSharePrice(Company company) {
             return marketService.getCompanySharePrice(company);
         }
@@ -460,8 +510,6 @@ public class StockBrokerage {
         public Map.Entry<Company, List<Double>> getCompanyPerformance(Company company) {
             return marketService.getCompanyPerformance(company);
         }
-
-        // ---- Order Placement ----
 
         public Order<Buy> placeBuyOrder(User user, Company company, String orderId,
                                         OrderType orderType, double shares, double limitPrice) {
@@ -473,12 +521,6 @@ public class StockBrokerage {
             return orderService.createSellOrder(user, company, orderId, orderType, shares, limitPrice);
         }
 
-        public void cancelOrder(String orderId) {
-            orderService.cancelOrder(orderId);
-        }
-
-        // ---- Observer ----
-
         public void registerObserver(Observer observer) {
             orderService.observers.add(observer);
         }
@@ -487,5 +529,4 @@ public class StockBrokerage {
             orderService.observers.remove(observer);
         }
     }
-
 }
