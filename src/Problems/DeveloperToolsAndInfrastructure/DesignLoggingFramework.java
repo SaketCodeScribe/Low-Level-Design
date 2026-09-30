@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 /*
 FRs:
@@ -136,13 +137,13 @@ public class DesignLoggingFramework {
             }
         }
     }
-
     static class LogDispatcher {
         private static final int MAX_BATCH = 500;
 
         private final List<Appender> appenders;
         private final BlockingQueue<Record> queue = new LinkedBlockingQueue<>(10_000);
         private final ExecutorService executor;
+        private final AtomicLong failedRecords = new AtomicLong();
         private volatile boolean running = true;
 
         public LogDispatcher(List<Appender> appenders) {
@@ -157,34 +158,34 @@ public class DesignLoggingFramework {
         }
 
         public void submit(Record record) {
-            if (!queue.offer(record)) {
-                System.err.println("log queue full, record dropped");
-            }
+            if (!queue.offer(record)) failedRecords.incrementAndGet();   // queue full
         }
+
+        public long failedRecords() { return failedRecords.get(); }
 
         private void run() {
             List<Record> batch = new ArrayList<>(MAX_BATCH);
-            boolean interrupted = false;
             try {
                 while (running || !queue.isEmpty()) {
                     Record first;
                     try {
                         first = queue.poll(100, TimeUnit.MILLISECONDS);
                     } catch (InterruptedException e) {
-                        interrupted = true;
                         break;
                     }
                     if (first == null) continue;
-
                     batch.add(first);
                     queue.drainTo(batch, MAX_BATCH - 1);
                     writeBatch(batch);
                     batch.clear();
                 }
             } finally {
+                Thread.interrupted();
                 queue.drainTo(batch);
                 if (!batch.isEmpty()) writeBatch(batch);
-                if (interrupted) Thread.currentThread().interrupt();
+                closeAppenders();
+                long f = failedRecords.get();
+                if (f > 0) System.err.println("logger shutdown: " + f + " records failed/dropped");
             }
         }
 
@@ -193,7 +194,16 @@ public class DesignLoggingFramework {
                 try {
                     ap.append(batch);
                 } catch (Throwable t) {
-                    System.err.println("appender disabled: " + ap + " -> " + t);
+                    failedRecords.addAndGet(batch.size());
+                    System.err.println("appender failed: " + ap.getClass().getSimpleName() + " -> " + t);
+                }
+            }
+        }
+
+        private void closeAppenders() {
+            for (Appender ap : appenders) {
+                if (ap instanceof Closeable c) {
+                    try { c.close(); } catch (IOException ignored) {}
                 }
             }
         }
@@ -203,26 +213,19 @@ public class DesignLoggingFramework {
             running = false;
             executor.shutdown();
 
+            boolean interrupted = false;
             try {
                 if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
                     executor.shutdownNow();
+                    executor.awaitTermination(2, TimeUnit.SECONDS);
                 }
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+                interrupted = true;
                 executor.shutdownNow();
             }
-
-            for (Appender ap : appenders) {
-                if (ap instanceof Closeable c) {
-                    try {
-                        c.close();
-                    } catch (IOException ignored) {
-                    }
-                }
-            }
+            if (interrupted) Thread.currentThread().interrupt();
         }
     }
-
     static class LoggerFactory {
         private static final LogDispatcher DISPATCHER = new LogDispatcher(List.of(
                 new ConsoleAppender(new SimpleTextFormatter()),
