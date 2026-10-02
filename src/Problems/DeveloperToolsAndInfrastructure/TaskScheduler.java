@@ -7,7 +7,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class TaskScheduler {
     static enum State {
-        WAITING, IN_PROGRESS, CANCELLED, FAILED, SUCCEEDED
+        WAITING, IN_PROGRESS, CANCELLED, FAILED, INITIATED, SUCCEEDED
     }
     static class TaskConfig {
         private final boolean[] runDays = new boolean[7];   // 0 = Mon ... 6 = Sun
@@ -88,6 +88,7 @@ public class TaskScheduler {
         ExecutorService executor;
         volatile boolean running;
         Set<Future<Task>> futureSet;
+        Thread consumer;
 
         public TaskSchedulerService() {
             this.map = new ConcurrentHashMap<>();
@@ -97,6 +98,7 @@ public class TaskScheduler {
                 return th;
             });
             futureSet = new HashSet<>();
+            this.consumer = new Thread(this::schedule, "Consumer Th.");
             running = true;
             Runtime.getRuntime().addShutdownHook(new Thread(this::shutdown));
         }
@@ -114,26 +116,43 @@ public class TaskScheduler {
             for (Observer o : observers) o.update(task);
         }
 
+        public boolean offer(String taskId, Task ts) {
+            if (!running) return false;
+            return map.putIfAbsent(taskId, ts) != null;
+        }
+
         public void schedule() {
             while(running) {
                 DayOfWeek today = LocalDate.now(ZoneId.of("UTC")).getDayOfWeek();
-                map.values().stream().filter(task -> task.getStatus() != State.CANCELLED && task.getLastExecutionTime() != null && task.getTaskConfig().runsOn(today) && !task.ranToday(ZoneId.of("UTC"))).forEach(task -> {
-                    CompletableFuture<Task> future = CompletableFuture.completedFuture(task);
-                    futureSet.add(future);
-                    future.thenApplyAsync(t -> {
-                                        if (!this.running) {
-                                            throw new RuntimeException("System interrupted");
-                                        }
-                                        return t.run();
-                                    },
-                            executor)
-                            .exceptionally(t -> t.setStatus(State.FAILED))
-                            .thenApplyAsync(t -> t.setStatus(State.SUCCEEDED))
-                            .thenApplyAsync(t -> futureSet.remove(t))
-                            .thenAcceptAsync(t -> notifyObservers(t));
 
+                map.values().stream()
+                        .filter(task -> task.getStatus() != State.CANCELLED &&
+                                task.getLastExecutionTime() != null &&
+                                task.getTaskConfig().runsOn(today) &&
+                                !task.ranToday(ZoneId.of("UTC")))
+                        .forEach(task -> {
+                            CompletableFuture<Task> future = CompletableFuture.completedFuture(task);
+                            futureSet.add(future);
+                            future.thenApplyAsync(this::execute, executor)
+                                    .thenAcceptAsync(this::notifyObservers);
+                            futureSet.add(future);
+                            future.whenComplete((t, ex) -> futureSet.remove(future));
                 });
             }
+        }
+
+        private Task execute(Task task) {
+            try {
+                if (!this.running) {
+                    throw new RuntimeException("System interrupted");
+                }
+                task.setStatus(State.INITIATED);
+                task.run();
+            }
+            catch (Exception e) {
+                task.setStatus(State.FAILED);
+            }
+            return task;
         }
 
         public synchronized void shutdown() {
@@ -183,6 +202,9 @@ public class TaskScheduler {
         }
 
         public void addObserver(Observer o) { schedulerService.register(o); }
+        public void submit(String taskId, TaskConfig config) {
+            schedulerService.offer(taskId, new Task(taskId, config));
+        }
     }
 
 }
