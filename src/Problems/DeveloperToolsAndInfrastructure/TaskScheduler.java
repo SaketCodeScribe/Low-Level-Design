@@ -30,8 +30,8 @@ public class TaskScheduler {
     static class Task {
         private final String taskId;
         private final TaskConfig taskConfig;
-        private Instant lastExecutionTime;
-        private State status;
+        private volatile Instant lastExecutionTime;
+        private volatile State status;
 
         public Task(String taskId, TaskConfig taskConfig) {
             this.taskId = taskId;
@@ -48,22 +48,21 @@ public class TaskScheduler {
         public void setLastExecutionTime(Instant t) { this.lastExecutionTime = t; }
         public void setStatus(State s) { this.status = s; }
 
-        public Task run() {
+        public Task run() throws RejectedExecutionException {
+            this.setStatus(State.IN_PROGRESS);
             try {
-                this.setStatus(State.IN_PROGRESS);
                 Thread.sleep(100000);
-                return this;
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+                throw new RejectedExecutionException(e);
             }
+            return this;
         }
 
 
         public boolean ranToday(ZoneId zone) {
             Instant last = lastExecutionTime;
             if (last == null) return false;
-            LocalDate lastDay = last.atZone(zone).toLocalDate();
-            return LocalDate.now().equals(lastDay);
+            return last.atZone(zone).toLocalDate().equals(LocalDate.now(zone));
         }
     }
     public interface Observer {
@@ -86,8 +85,8 @@ public class TaskScheduler {
     static class TaskSchedulerService implements Observable {
         Map<String, Task> map;
         ExecutorService executor;
-        volatile boolean running;
-        Set<Future<Task>> futureSet;
+        volatile boolean running = true;
+        Set<Future<Void>> futureSet;
         Thread consumer;
 
         public TaskSchedulerService() {
@@ -97,10 +96,11 @@ public class TaskScheduler {
                 th.setDaemon(true);
                 return th;
             });
-            futureSet = new HashSet<>();
+            futureSet = ConcurrentHashMap.newKeySet();
             this.consumer = new Thread(this::schedule, "Consumer Th.");
-            running = true;
+            this.consumer.setDaemon(true);
             Runtime.getRuntime().addShutdownHook(new Thread(this::shutdown));
+            this.consumer.start();
         }
 
         private final Set<Observer> observers = ConcurrentHashMap.newKeySet();
@@ -118,27 +118,36 @@ public class TaskScheduler {
 
         public boolean offer(String taskId, Task ts) {
             if (!running) return false;
-            return map.putIfAbsent(taskId, ts) != null;
+            return map.putIfAbsent(taskId, ts) == null;
         }
 
         public void schedule() {
+            ZoneId utc = ZoneId.of("UTC");
             while(running) {
-                DayOfWeek today = LocalDate.now(ZoneId.of("UTC")).getDayOfWeek();
+                DayOfWeek today = LocalDate.now(utc).getDayOfWeek();
 
                 map.values().stream()
-                        .filter(task -> task.getStatus() != State.CANCELLED &&
-                                task.getLastExecutionTime() != null &&
+                        .filter(task -> (task.getStatus() != State.IN_PROGRESS) &&
                                 task.getTaskConfig().runsOn(today) &&
-                                !task.ranToday(ZoneId.of("UTC")))
-                        .forEach(task -> {
-                            CompletableFuture<Task> future = CompletableFuture.completedFuture(task);
-                            futureSet.add(future);
-                            future.thenApplyAsync(this::execute, executor)
-                                    .thenAcceptAsync(this::notifyObservers);
-                            futureSet.add(future);
-                            future.whenComplete((t, ex) -> futureSet.remove(future));
-                });
+                                !task.ranToday(utc))
+                        .forEach(this::submit);
+                try {
+                    Thread.sleep(10_000);
+                } catch (InterruptedException e) {
+                    running = false;
+                    break;
+                }
             }
+        }
+
+        private void submit(Task task) {
+            task.setStatus(State.INITIATED);
+            task.setLastExecutionTime(Instant.now());
+            CompletableFuture<Void> future = CompletableFuture.completedFuture(task)
+                    .thenApplyAsync(this::execute, executor)
+                    .thenAcceptAsync(this::notifyObservers, executor);
+            futureSet.add(future);
+            future.whenComplete((t, ex) -> futureSet.remove(future));
         }
 
         private Task execute(Task task) {
@@ -146,20 +155,25 @@ public class TaskScheduler {
                 if (!this.running) {
                     throw new RuntimeException("System interrupted");
                 }
-                task.setStatus(State.INITIATED);
                 task.run();
             }
-            catch (Exception e) {
+            catch (RejectedExecutionException e) {
                 task.setStatus(State.FAILED);
+            }
+            catch (Exception e) {
+                task.setStatus(State.WAITING);
             }
             return task;
         }
 
         public synchronized void shutdown() {
             if (!running) return;
+            running = false;
+            this.consumer.interrupt();
 
-            executor.shutdown();
             try {
+                consumer.join(2000);
+                executor.shutdown();
                 if (!executor.awaitTermination(5, TimeUnit.SECONDS)){
                     executor.shutdownNow();
                     executor.awaitTermination(5, TimeUnit.SECONDS);
@@ -174,10 +188,10 @@ public class TaskScheduler {
         public boolean cancelTask(String taskId) {
             DayOfWeek today = LocalDate.now(ZoneId.of("UTC")).getDayOfWeek();
 
-            return map.computeIfPresent(taskId, (s, task) -> {
-                if (task.getTaskConfig().runsOn(today) && task.getStatus() != State.SUCCEEDED) task.setStatus(State.CANCELLED);
+            return Optional.ofNullable(map.computeIfPresent(taskId, (s, task) -> {
+                task.setStatus(State.CANCELLED);
                 return task;
-            }).getStatus() == State.CANCELLED;
+            })).map(t -> t.getStatus() == State.CANCELLED).orElse(false);
         }
     }
 
