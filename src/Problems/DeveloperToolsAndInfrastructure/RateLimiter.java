@@ -103,7 +103,7 @@ public class RateLimiter {
             this.rps = rps;
             this.tokens = new ConcurrentHashMap<>();
             this.executorService = Executors.newFixedThreadPool(10, runnable -> {
-                Thread th = new Thread("Worker thread");
+                Thread th = new Thread(runnable, "Worker thread");
                 th.setDaemon(true);
                 return th;
             });
